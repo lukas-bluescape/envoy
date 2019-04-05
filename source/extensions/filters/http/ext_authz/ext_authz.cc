@@ -218,7 +218,10 @@ void Filter::onComplete(Filters::Common::ExtAuthz::ResponsePtr&& response) {
           // First remove all headers requested by the ext_authz filter,
           // to ensure that they will override existing headers
           for (const auto& header : headers) {
-            response_headers.remove(header.first);
+            // This is just a work-around for set-cookie.
+            if (header.first != Http::Headers::get().SetCookie) {
+              response_headers.remove(header.first);
+            }
           }
           // Then set all of the requested headers, allowing the
           // same header to be set multiple times, e.g. `Set-Cookie`
