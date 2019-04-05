@@ -158,10 +158,9 @@ void Filter::onComplete(Filters::Common::ExtAuthz::ResponsePtr&& response) {
 
   switch (response->status) {
   case CheckStatus::OK: {
-    ENVOY_STREAM_LOG(trace, "ext_authz filter added header(s) to the request:", *callbacks_);
-    if (config_->clearRouteCache() &&
-        (!response->headers_to_add.empty() || !response->headers_to_append.empty())) {
-      ENVOY_STREAM_LOG(debug, "ext_authz is clearing route cache", *callbacks_);
+    ENVOY_STREAM_LOG(trace, "ext_authz filter added header(s) to the request:", *
+    if (!response->headers_to_add.empty() || !response->headers_to_append.empty()) {
+      ENVOY_STREAM_LOG(debug, "ext_authz has cleared route cache", *callbacks_);
       callbacks_->clearRouteCache();
     }
     for (const auto& header : response->headers_to_add) {
