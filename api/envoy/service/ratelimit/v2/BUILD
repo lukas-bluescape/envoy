@@ -14,6 +14,7 @@ api_proto_library_internal(
     name = "rls",
     srcs = ["rls.proto"],
     has_services = 1,
+    visibility = ["//visibility:public"],
     deps = [
         "//envoy/api/v2/core:base",
         "//envoy/api/v2/core:grpc_service",
