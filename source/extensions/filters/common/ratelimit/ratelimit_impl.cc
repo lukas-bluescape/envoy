@@ -22,12 +22,14 @@ namespace RateLimit {
 
 GrpcClientImpl::GrpcClientImpl(Grpc::RawAsyncClientPtr&& async_client,
                                const absl::optional<std::chrono::milliseconds>& timeout,
-                               envoy::config::core::v3::ApiVersion transport_api_version)
+                               envoy::config::core::v3::ApiVersion transport_api_version,
+                               bool use_alpha)
     : async_client_(std::move(async_client)), timeout_(timeout),
       service_method_(
           Grpc::VersionedMethods("envoy.service.ratelimit.v3.RateLimitService.ShouldRateLimit",
-                                 "envoy.service.ratelimit.v2.RateLimitService.ShouldRateLimit")
-              .getMethodDescriptorForVersion(transport_api_version)),
+                                 "envoy.service.ratelimit.v2.RateLimitService.ShouldRateLimit",
+                                 "pb.lyft.ratelimit.RateLimitService.ShouldRateLimit")
+              .getMethodDescriptorForVersion(transport_api_version, use_alpha)),
       transport_api_version_(transport_api_version) {}
 
 GrpcClientImpl::~GrpcClientImpl() { ASSERT(!callbacks_); }
