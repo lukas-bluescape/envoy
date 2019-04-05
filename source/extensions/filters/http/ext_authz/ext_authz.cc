@@ -177,6 +177,8 @@ void Filter::onComplete(Filters::Common::ExtAuthz::ResponsePtr&& response) {
       if (header_to_modify) {
         ENVOY_STREAM_LOG(trace, " '{}':'{}'", *callbacks_, header.first.get(), header.second);
         Http::HeaderMapImpl::appendToHeader(header_to_modify->value(), header.second);
+      } else {
+        request_headers_->addCopy(header.first, header.second);
       }
     }
     config_->incCounter(cluster_->statsScope(), config_->ext_authz_ok_);
