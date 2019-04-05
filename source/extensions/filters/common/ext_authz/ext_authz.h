@@ -5,13 +5,14 @@
 #include <string>
 #include <vector>
 
+#include "common/singleton/const_singleton.h"
+
 #include "envoy/common/pure.h"
 #include "envoy/http/codes.h"
 #include "envoy/service/auth/v3/external_auth.pb.h"
 #include "envoy/stream_info/stream_info.h"
 #include "envoy/tracing/http_tracer.h"
 
-#include "common/singleton/const_singleton.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -30,6 +31,7 @@ struct TracingConstantValues {
 };
 
 using TracingConstants = ConstSingleton<TracingConstantValues>;
+
 
 /**
  * Possible async results for a check call.

@@ -206,12 +206,14 @@ ClientConfig::toUpstreamMatchers(const envoy::type::matcher::v3::ListStringMatch
 }
 
 RawHttpClientImpl::RawHttpClientImpl(Upstream::ClusterManager& cm, ClientConfigSharedPtr config)
-    : cm_(cm), config_(config) {}
+    : cm_(cm), config_(config), real_time_() {}
 
 RawHttpClientImpl::~RawHttpClientImpl() { ASSERT(callbacks_ == nullptr); }
 
 void RawHttpClientImpl::cancel() {
   ASSERT(callbacks_ != nullptr);
+  span_->setTag(Tracing::Tags::get().Status, Tracing::Tags::get().Canceled);
+  span_->finishSpan();
   request_->cancel();
   callbacks_ = nullptr;
 }
@@ -221,10 +223,17 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
                               const envoy::service::auth::v3::CheckRequest& request,
                               Tracing::Span& parent_span,
                               const StreamInfo::StreamInfo& stream_info) {
+
   ASSERT(callbacks_ == nullptr);
+  ASSERT(span_ == nullptr);
+
   callbacks_ = &callbacks;
 
   Http::RequestHeaderMapPtr headers;
+
+  span_ = parent_span.spawnChild(Tracing::EgressConfig::get(), "async "+ config_->cluster() + " egress", real_time_.systemTime());
+  span_->setTag(Tracing::Tags::get().UpstreamCluster, config_->cluster());
+
   const uint64_t request_length = request.attributes().request().http().body().size();
   if (request_length > 0) {
     headers = Http::createHeaderMap<Http::RequestHeaderMapImpl>(
@@ -280,6 +289,7 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
 void RawHttpClientImpl::onSuccess(const Http::AsyncClient::Request&,
                                   Http::ResponseMessagePtr&& message) {
   callbacks_->onComplete(toResponse(std::move(message)));
+  span_->finishSpan();
   callbacks_ = nullptr;
 }
 
@@ -287,6 +297,8 @@ void RawHttpClientImpl::onFailure(const Http::AsyncClient::Request&,
                                   Http::AsyncClient::FailureReason reason) {
   ASSERT(reason == Http::AsyncClient::FailureReason::Reset);
   callbacks_->onComplete(std::make_unique<Response>(errorResponse()));
+  span_->setTag(Tracing::Tags::get().Error, Tracing::Tags::get().True);
+  span_->finishSpan();
   callbacks_ = nullptr;
 }
 
@@ -318,6 +330,7 @@ ResponsePtr RawHttpClientImpl::toResponse(Http::ResponseMessagePtr message) {
                        config_->upstreamHeaderToAppendMatchers(),
                        Response{CheckStatus::OK, Http::HeaderVector{}, Http::HeaderVector{},
                                 Http::HeaderVector{}, EMPTY_STRING, Http::Code::OK}};
+    span_->setTag(TracingConstants::get().TraceStatus, TracingConstants::get().TraceOk);
     return std::move(ok.response_);
   }
 
@@ -327,6 +340,8 @@ ResponsePtr RawHttpClientImpl::toResponse(Http::ResponseMessagePtr message) {
                          Response{CheckStatus::Denied, Http::HeaderVector{}, Http::HeaderVector{},
                                   Http::HeaderVector{}, message->bodyAsString(),
                                   static_cast<Http::Code>(status_code)}};
+  span_->setTag(TracingConstants::get().TraceStatus, TracingConstants::get().TraceUnauthz);
+
   return std::move(denied.response_);
 }
 

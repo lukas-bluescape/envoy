@@ -30,6 +30,7 @@ namespace Common {
 namespace ExtAuthz {
 
 using ExtAuthzAsyncCallbacks = Grpc::AsyncRequestCallbacks<envoy::service::auth::v3::CheckResponse>;
+// typedef Grpc::AsyncRequestCallbacks<envoy::service::auth::v2::CheckResponse> ExtAuthzAsyncCallbacks;
 
 /*
  * This client implementation is used when the Ext_Authz filter needs to communicate with an gRPC
