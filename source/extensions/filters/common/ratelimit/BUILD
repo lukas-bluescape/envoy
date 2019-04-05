@@ -27,6 +27,9 @@ envoy_cc_library(
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/common/ratelimit/v3:pkg_cc_proto",
         "@envoy_api//envoy/service/ratelimit/v3:pkg_cc_proto",
+
+        # Support to legacy rate-limit service
+        "@envoy_api//envoy/service/ratelimit/v1:pkg_cc_proto",
     ],
 )
 
