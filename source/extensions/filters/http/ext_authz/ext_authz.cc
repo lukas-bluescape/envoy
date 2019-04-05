@@ -178,6 +178,8 @@ void Filter::onComplete(Filters::Common::ExtAuthz::ResponsePtr&& response) {
       if (header_to_modify) {
         ENVOY_STREAM_LOG(trace, "'{}':'{}'", *callbacks_, header.first.get(), header.second);
         request_headers_->appendCopy(header.first, header.second);
+      } else {
+        request_headers_->addCopy(header.first, header.second);
       }
     }
     if (cluster_) {
