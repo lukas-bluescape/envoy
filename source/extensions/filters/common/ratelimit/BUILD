@@ -28,6 +28,9 @@ envoy_cc_library(
         "@envoy_api//envoy/api/v2/ratelimit:ratelimit_cc",
         "@envoy_api//envoy/config/ratelimit/v2:rls_cc",
         "@envoy_api//envoy/service/ratelimit/v2:rls_cc",
+
+        # Support to legacy rate-limit service
+        "@envoy_api//envoy/service/ratelimit/v1:rls_cc",
     ],
 )
 
