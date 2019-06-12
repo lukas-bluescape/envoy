@@ -377,10 +377,8 @@ TEST_F(ExtAuthzHttpClientTest, AuthorizationRequest5xxError) {
       Http::HeaderMapPtr{new Http::TestHeaderMapImpl{{":status", "503"}}}));
   envoy::service::auth::v2::CheckRequest request;
   client_.check(request_callbacks_, request, Tracing::NullSpan::instance());
-
   EXPECT_CALL(request_callbacks_,
               onComplete_(WhenDynamicCastTo<ResponsePtr&>(AuthzErrorResponse(CheckStatus::Error))));
-
   client_.onSuccess(std::move(check_response));
 }
 
@@ -391,10 +389,8 @@ TEST_F(ExtAuthzHttpClientTest, AuthorizationRequestErrorParsingStatusCode) {
       Http::HeaderMapPtr{new Http::TestHeaderMapImpl{{":status", "foo"}}}));
   envoy::service::auth::v2::CheckRequest request;
   client_.check(request_callbacks_, request, Tracing::NullSpan::instance());
-
   EXPECT_CALL(request_callbacks_,
               onComplete_(WhenDynamicCastTo<ResponsePtr&>(AuthzErrorResponse(CheckStatus::Error))));
-
   client_.onSuccess(std::move(check_response));
 }
 
@@ -403,7 +399,6 @@ TEST_F(ExtAuthzHttpClientTest, CancelledAuthorizationRequest) {
   envoy::service::auth::v2::CheckRequest request;
   EXPECT_CALL(async_client_, send_(_, _, _)).WillOnce(Return(&async_request_));
   client_.check(request_callbacks_, request, Tracing::NullSpan::instance());
-
   EXPECT_CALL(async_request_, cancel());
   client_.cancel();
 }
