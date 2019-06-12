@@ -1,6 +1,7 @@
 #include "extensions/filters/common/ext_authz/ext_authz_http_impl.h"
 
 #include "common/common/enum_to_int.h"
+#include "common/common/fmt.h"
 #include "common/http/async_client_impl.h"
 #include "common/http/codes.h"
 
@@ -88,7 +89,8 @@ ClientConfig::ClientConfig(const envoy::config::filter::http::ext_authz::v2::Ext
       authorization_headers_to_add_(
           toHeadersAdd(config.http_service().authorization_request().headers_to_add())),
       cluster_name_(config.http_service().server_uri().cluster()), timeout_(timeout),
-      path_prefix_(path_prefix) {}
+      path_prefix_(path_prefix),
+      tracing_name_(fmt::format("async {} egress", config.http_service().server_uri().cluster())) {}
 
 MatcherSharedPtr
 ClientConfig::toRequestMatchers(const envoy::type::matcher::ListStringMatcher& list) {
@@ -172,7 +174,8 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
 
   callbacks_ = &callbacks;
 
-  span_ = parent_span.spawnChild(Tracing::EgressConfig::get(), "async "+ config_->cluster() + " egress", real_time_.systemTime());
+  span_ = parent_span.spawnChild(Tracing::EgressConfig::get(), config_->tracingName(),
+                                 real_time_.systemTime());
   span_->setTag(Tracing::Tags::get().UpstreamCluster, config_->cluster());
 
   Http::HeaderMapPtr headers;

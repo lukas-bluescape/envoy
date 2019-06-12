@@ -99,6 +99,11 @@ public:
    */
   const Http::LowerCaseStrPairVector& headersToAdd() const { return authorization_headers_to_add_; }
 
+  /**
+   * Returns the name used for tracing.
+   */
+  const std::string& tracingName() { return tracing_name_; }
+
 private:
   static MatcherSharedPtr toRequestMatchers(const envoy::type::matcher::ListStringMatcher& matcher);
   static MatcherSharedPtr toClientMatchers(const envoy::type::matcher::ListStringMatcher& matcher);
@@ -114,6 +119,7 @@ private:
   const std::string cluster_name_;
   const std::chrono::milliseconds timeout_;
   const std::string path_prefix_;
+  const std::string tracing_name_;
 };
 
 using ClientConfigSharedPtr = std::shared_ptr<ClientConfig>;
