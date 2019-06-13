@@ -167,7 +167,6 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
   ASSERT(span_ == nullptr);
 
   callbacks_ = &callbacks;
-
   span_ = parent_span.spawnChild(Tracing::EgressConfig::get(), config_->tracingName(),
                                  real_time_.systemTime());
   span_->setTag(Tracing::Tags::get().UpstreamCluster, config_->cluster());
