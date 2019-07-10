@@ -23,6 +23,7 @@ api_proto_library_internal(
     deps = [
         ":attribute_context",
         "//envoy/api/v2/core:base",
+        "//envoy/api/v2/ratelimit",
         "//envoy/type:http_status",
     ],
 )

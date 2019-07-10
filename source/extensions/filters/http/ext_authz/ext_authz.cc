@@ -35,7 +35,11 @@ void Filter::initiateCall(const Http::HeaderMap& headers) {
   }
 
   Router::RouteConstSharedPtr route = callbacks_->route();
-  if (route == nullptr || route->routeEntry() == nullptr) {
+  if (!route) {
+    return;
+  }
+  const Router::RouteEntry* route_entry = route->routeEntry();
+  if (!route_entry) {
     return;
   }
   cluster_ = callbacks_->clusterInfo();
@@ -65,9 +69,32 @@ void Filter::initiateCall(const Http::HeaderMap& headers) {
   if (maybe_merged_per_route_config) {
     context_extensions = maybe_merged_per_route_config.value().takeContextExtensions();
   }
+
+  std::vector<Envoy::RateLimit::Descriptor> descriptors;
+
+  // Get all applicable rate limit policy entries for the route.
+  populateRateLimitDescriptors(route_entry->rateLimitPolicy(), descriptors, route_entry, headers);
+
+  // Get all applicable rate limit policy entries for the virtual host if the route opted to
+  // include the virtual host rate limits.
+  if (route_entry->includeVirtualHostRateLimits()) {
+    populateRateLimitDescriptors(route_entry->virtualHost().rateLimitPolicy(), descriptors,
+                                 route_entry, headers);
+  }
+
   Filters::Common::ExtAuthz::CheckRequestUtils::createHttpCheck(
       callbacks_, headers, std::move(context_extensions), check_request_,
       config_->maxRequestBytes());
+
+  for (const Envoy::RateLimit::Descriptor& descriptor : descriptors) {
+    envoy::api::v2::ratelimit::RateLimitDescriptor* new_descriptor = check_request_.add_descriptors();
+    for (const Envoy::RateLimit::DescriptorEntry& entry : descriptor.entries_) {
+      envoy::api::v2::ratelimit::RateLimitDescriptor::Entry* new_entry =
+        new_descriptor->add_entries();
+      new_entry->set_key(entry.key_);
+      new_entry->set_value(entry.value_);
+    }
+  }
 
   ENVOY_STREAM_LOG(trace, "ext_authz filter calling authorization server", *callbacks_);
   state_ = State::Calling;
@@ -95,6 +122,26 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::HeaderMap& headers, bool e
   return filter_return_ == FilterReturn::StopDecoding
              ? Http::FilterHeadersStatus::StopAllIterationAndWatermark
              : Http::FilterHeadersStatus::Continue;
+}
+
+void Filter::populateRateLimitDescriptors(const Router::RateLimitPolicy& rate_limit_policy,
+                                          std::vector<RateLimit::Descriptor>& descriptors,
+                                          const Router::RouteEntry* route_entry,
+                                          const Http::HeaderMap& headers) const {
+  /* We hard-code the stage as 0 instead of config_->state(), since we
+   * don't have that config.  OK for POC, as Ambassador doesn't have a
+   * way to set the stage away from 0 anyway.  */
+  for (const Router::RateLimitPolicyEntry& rate_limit :
+       rate_limit_policy.getApplicableRateLimit(0)) {
+    const std::string& disable_key = rate_limit.disableKey();
+    if (!disable_key.empty() &&
+        !config_->runtime().snapshot().featureEnabled(
+            fmt::format("ratelimit.{}.http_filter_enabled", disable_key), 100)) {
+      continue;
+    }
+    rate_limit.populateDescriptors(*route_entry, descriptors, config_->localInfo().clusterName(),
+                                   headers, *callbacks_->streamInfo().downstreamRemoteAddress());
+  }
 }
 
 Http::FilterDataStatus Filter::decodeData(Buffer::Instance&, bool end_stream) {
