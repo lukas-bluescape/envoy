@@ -62,6 +62,7 @@ protected:
                    Http2Frame::ResponseStatus expected_http_status, const std::string& flood_stat);
   Http2Frame readFrame();
   void sendFame(const Http2Frame& frame);
+  void setNetworkConnectionBufferSize();
   void beginSession();
 
   IntegrationTcpClientPtr tcp_client_;

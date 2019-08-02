@@ -1076,6 +1076,21 @@ namespace {
 const int64_t TransmitThreshold = 100 * 1024 * 1024;
 } // namespace
 
+void Http2FloodMitigationTest::setNetworkConnectionBufferSize() {
+  // nghttp2 library has its own internal mitigation for outbound control frames. The mitigation is
+  // trigerred when there are more than 10000 PING or SETTINGS frames with ACK flag in the nghttp2
+  // internal outbound queue. It is possible to trigger this mitigation in nghttp2 before triggering
+  // Envoy's own flood mitigation. This can happen when a buffer larger enough to contain over 10K
+  // PING or SETTINGS frames is dispatched to the nghttp2 library. To prevent this from happening
+  // the network connection receive buffer needs to be smaller than 90Kb (which is 10K SETTINGS
+  // frames). Set it to the arbitrarily chosen value of 32K.
+  config_helper_.addConfigModifier([](envoy::config::bootstrap::v2::Bootstrap& bootstrap) -> void {
+    RELEASE_ASSERT(bootstrap.mutable_static_resources()->listeners_size() >= 1, "");
+    auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
+    listener->mutable_per_connection_buffer_limit_bytes()->set_value(32 * 1024);
+  });
+}
+
 void Http2FloodMitigationTest::beginSession() {
   setDownstreamProtocol(Http::CodecClient::Type::HTTP2);
   setUpstreamProtocol(FakeHttpConnection::Type::HTTP2);
@@ -1180,11 +1195,13 @@ INSTANTIATE_TEST_SUITE_P(IpVersions, Http2FloodMitigationTest,
                          TestUtility::ipTestParamsToString);
 
 TEST_P(Http2FloodMitigationTest, Ping) {
+  setNetworkConnectionBufferSize();
   beginSession();
   floodServer(Http2Frame::makePingFrame(), "http2.outbound_control_flood");
 }
 
 TEST_P(Http2FloodMitigationTest, Settings) {
+  setNetworkConnectionBufferSize();
   beginSession();
   floodServer(Http2Frame::makeEmptySettingsFrame(), "http2.outbound_control_flood");
 }
