@@ -64,6 +64,8 @@ TEST_P(Http2IntegrationTest, Retry) { testRetry(); }
 
 TEST_P(Http2IntegrationTest, RetryAttemptCount) { testRetryAttemptCountHeader(); }
 
+TEST_P(Http2IntegrationTest, LargeRequestTrailersRejected) { testLargeRequestTrailers(66, 60); }
+
 static std::string response_metadata_filter = R"EOF(
 name: response-metadata-filter
 config: {}
@@ -1270,6 +1272,37 @@ void Http2RingHashIntegrationTest::sendMultipleRequests(
     EXPECT_TRUE(responses[i]->complete());
     cb(*responses[i]);
   }
+}
+
+// Test cookie value parsing
+TEST_P(Http2RingHashIntegrationTest, testLargeCookieParsing) {
+  config_helper_.addConfigModifier(
+      [&](envoy::config::filter::network::http_connection_manager::v2::HttpConnectionManager& hcm)
+          -> void {
+        auto* hash_policy = hcm.mutable_route_config()
+                                ->mutable_virtual_hosts(0)
+                                ->mutable_routes(0)
+                                ->mutable_route()
+                                ->add_hash_policy();
+        auto* cookie = hash_policy->mutable_cookie();
+        cookie->set_name("foo");
+      });
+
+  Http::TestHeaderMapImpl headers({{":method", "POST"},
+                                   {":path", "/test/long/url"},
+                                   {":scheme", "http"},
+                                   {":authority", "host"}});
+  for (int i = 0; i < 1000; i++) {
+    headers.addCopy("cookie", "foo=bar" + std::to_string(i));
+  }
+  num_upstreams_ = 2;
+  std::set<std::string> served_by;
+  sendMultipleRequests(128, headers, [&](IntegrationStreamDecoder& response) {
+    EXPECT_EQ("200", response.headers().Status()->value().getStringView());
+    EXPECT_TRUE(response.headers().get(Http::Headers::get().SetCookie) == nullptr);
+    served_by.insert(std::string(
+        response.headers().get(Http::LowerCaseString("x-served-by"))->value().getStringView()));
+  });
 }
 
 TEST_P(Http2RingHashIntegrationTest, CookieRoutingNoCookieNoTtl) {
