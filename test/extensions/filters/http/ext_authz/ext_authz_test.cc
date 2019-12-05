@@ -716,6 +716,7 @@ TEST_F(HttpFilterTest, NoClearCacheRouteConfig) {
   grpc_service:
     envoy_grpc:
       cluster_name: "ext_authz_server"
+  clear_route_cache: false
   )EOF");
 
   prepareCheck();

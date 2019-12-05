@@ -20,13 +20,11 @@ namespace RateLimit {
 
 
 // Values used for selecting service paths.
-// TODO(gsagula): select V2 when Ambassador gets a config for selecting non-legacy.
-// constexpr char V2[] = "envoy.service.ratelimit.v2.RateLimitService.ShouldRateLimit";
-constexpr char V1[] = "pb.lyft.ratelimit.RateLimitService.ShouldRateLimit";
+constexpr char V2[] = "envoy.service.ratelimit.v2.RateLimitService.ShouldRateLimit";
 
 GrpcClientImpl::GrpcClientImpl(Grpc::RawAsyncClientPtr&& async_client,
                                const absl::optional<std::chrono::milliseconds>& timeout)
-    : service_method_(*Protobuf::DescriptorPool::generated_pool()->FindMethodByName(V1)),
+    : service_method_(*Protobuf::DescriptorPool::generated_pool()->FindMethodByName(V2)),
       async_client_(std::move(async_client)), timeout_(timeout) {}
 
 GrpcClientImpl::~GrpcClientImpl() { ASSERT(!callbacks_); }
