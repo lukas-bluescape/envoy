@@ -1,6 +1,14 @@
 Version history
 ---------------
 
+1.12.3 (Pending)
+==========================
+* sds: fixed the SDS vulnerability that TLS validation context (e.g., subject alt name or hash) cannot be effectively validated in some cases.
+
+1.12.2 (December 10, 2019)
+==========================
+* http: fixed CVE-2019-18801 by allocating sufficient memory for request headers.
+
 1.12.1 (November 8, 2019)
 =========================
 * listener: fixed CVE-2019-18836 by clearing accept filters before connection creation.
