@@ -15,6 +15,13 @@ envoy_cc_library(
         "//include/envoy/http:codes_interface",
         "//source/common/tracing:http_tracer_lib",
         "@envoy_api//envoy/service/auth/v3:pkg_cc_proto",
+
+        # The DescriptorPool requires this dependence in runtime only.  It should NOT be removed until
+        # the deprecation of `envoy.config.filter.http.ext_authz.v2.ExtAuthz.use_alpha` goes from
+        # phase 2 fail-by-default to phase 3 code-removal.  Otherwise linker will drop the object file
+        # associated with v2alpha/external_auth.pb.cc causing FindMethodByName() to always return
+        # nullptr when looking up "envoy.service.auth.v2alpha.Authorization.Check".
+        "@envoy_api//envoy/service/auth/v2alpha:pkg_cc_proto",
     ],
 )
 
