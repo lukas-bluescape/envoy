@@ -1,5 +1,8 @@
 #include "extensions/filters/http/header_to_metadata/header_to_metadata_filter.h"
 
+#include "envoy/extensions/filters/http/header_to_metadata/v3/header_to_metadata.pb.h"
+
+#include "common/common/base64.h"
 #include "common/config/well_known_names.h"
 #include "common/protobuf/protobuf.h"
 
@@ -12,19 +15,14 @@ namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
 namespace HeaderToMetadataFilter {
-namespace {
 
-const uint32_t MAX_HEADER_VALUE_LEN = 100;
-
-} // namespace
-
-Config::Config(const envoy::config::filter::http::header_to_metadata::v2::Config config) {
+Config::Config(const envoy::extensions::filters::http::header_to_metadata::v3::Config config) {
   request_set_ = Config::configToVector(config.request_rules(), request_rules_);
   response_set_ = Config::configToVector(config.response_rules(), response_rules_);
 
   // don't allow an empty configuration
   if (!response_set_ && !request_set_) {
-    throw new EnvoyException("Must at least specify either response or request config");
+    throw EnvoyException("Must at least specify either response or request config");
   }
 }
 
@@ -54,9 +52,10 @@ bool Config::configToVector(const ProtobufRepeatedRule& proto_rules,
 
 HeaderToMetadataFilter::HeaderToMetadataFilter(const ConfigSharedPtr config) : config_(config) {}
 
-HeaderToMetadataFilter::~HeaderToMetadataFilter() {}
+HeaderToMetadataFilter::~HeaderToMetadataFilter() = default;
 
-Http::FilterHeadersStatus HeaderToMetadataFilter::decodeHeaders(Http::HeaderMap& headers, bool) {
+Http::FilterHeadersStatus HeaderToMetadataFilter::decodeHeaders(Http::RequestHeaderMap& headers,
+                                                                bool) {
   if (config_->doRequest()) {
     writeHeaderToMetadata(headers, config_->requestRules(), *decoder_callbacks_);
   }
@@ -69,7 +68,8 @@ void HeaderToMetadataFilter::setDecoderFilterCallbacks(
   decoder_callbacks_ = &callbacks;
 }
 
-Http::FilterHeadersStatus HeaderToMetadataFilter::encodeHeaders(Http::HeaderMap& headers, bool) {
+Http::FilterHeadersStatus HeaderToMetadataFilter::encodeHeaders(Http::ResponseHeaderMap& headers,
+                                                                bool) {
   if (config_->doResponse()) {
     writeHeaderToMetadata(headers, config_->responseRules(), *encoder_callbacks_);
   }
@@ -83,7 +83,7 @@ void HeaderToMetadataFilter::setEncoderFilterCallbacks(
 
 bool HeaderToMetadataFilter::addMetadata(StructMap& map, const std::string& meta_namespace,
                                          const std::string& key, absl::string_view value,
-                                         ValueType type) const {
+                                         ValueType type, ValueEncode encode) const {
   ProtobufWkt::Value val;
 
   if (value.empty()) {
@@ -98,17 +98,33 @@ bool HeaderToMetadataFilter::addMetadata(StructMap& map, const std::string& meta
     return false;
   }
 
+  std::string decodedValue = std::string(value);
+  if (encode == envoy::extensions::filters::http::header_to_metadata::v3::Config::BASE64) {
+    decodedValue = Base64::decodeWithoutPadding(value);
+    if (decodedValue.empty()) {
+      ENVOY_LOG(debug, "Base64 decode failed");
+      return false;
+    }
+  }
+
   // Sane enough, add the key/value.
   switch (type) {
-  case envoy::config::filter::http::header_to_metadata::v2::Config_ValueType_STRING:
-    val.set_string_value(std::string(value));
+  case envoy::extensions::filters::http::header_to_metadata::v3::Config::STRING:
+    val.set_string_value(std::move(decodedValue));
     break;
-  case envoy::config::filter::http::header_to_metadata::v2::Config_ValueType_NUMBER: {
+  case envoy::extensions::filters::http::header_to_metadata::v3::Config::NUMBER: {
     double dval;
-    if (absl::SimpleAtod(StringUtil::trim(value), &dval)) {
+    if (absl::SimpleAtod(StringUtil::trim(decodedValue), &dval)) {
       val.set_number_value(dval);
     } else {
       ENVOY_LOG(debug, "value to number conversion failed");
+      return false;
+    }
+    break;
+  }
+  case envoy::extensions::filters::http::header_to_metadata::v3::Config::PROTOBUF_VALUE: {
+    if (!val.ParseFromString(decodedValue)) {
+      ENVOY_LOG(debug, "parse from decoded string failed");
       return false;
     }
     break;
@@ -152,7 +168,8 @@ void HeaderToMetadataFilter::writeHeaderToMetadata(Http::HeaderMap& headers,
 
       if (!value.empty()) {
         const auto& nspace = decideNamespace(keyval.metadata_namespace());
-        addMetadata(structs_by_namespace, nspace, keyval.key(), value, keyval.type());
+        addMetadata(structs_by_namespace, nspace, keyval.key(), value, keyval.type(),
+                    keyval.encode());
       } else {
         ENVOY_LOG(debug, "value is empty, not adding metadata");
       }
@@ -166,7 +183,8 @@ void HeaderToMetadataFilter::writeHeaderToMetadata(Http::HeaderMap& headers,
 
       if (!keyval.value().empty()) {
         const auto& nspace = decideNamespace(keyval.metadata_namespace());
-        addMetadata(structs_by_namespace, nspace, keyval.key(), keyval.value(), keyval.type());
+        addMetadata(structs_by_namespace, nspace, keyval.key(), keyval.value(), keyval.type(),
+                    keyval.encode());
       } else {
         ENVOY_LOG(debug, "value is empty, not adding metadata");
       }

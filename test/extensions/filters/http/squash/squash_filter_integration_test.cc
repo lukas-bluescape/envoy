@@ -1,6 +1,6 @@
-#include <stdlib.h>
-
 #include <cstdlib>
+
+#include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 
 #include "common/protobuf/protobuf.h"
 
@@ -21,7 +21,7 @@ class SquashFilterIntegrationTest : public testing::TestWithParam<Network::Addre
 public:
   SquashFilterIntegrationTest() : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, GetParam()) {}
 
-  ~SquashFilterIntegrationTest() {
+  ~SquashFilterIntegrationTest() override {
     if (fake_squash_connection_) {
       AssertionResult result = fake_squash_connection_->close();
       RELEASE_ASSERT(result, result.message());
@@ -45,9 +45,9 @@ public:
     result = request_stream->waitForEndStream(*dispatcher_);
     RELEASE_ASSERT(result, result.message());
     if (body.empty()) {
-      request_stream->encodeHeaders(Http::TestHeaderMapImpl{{":status", status}}, true);
+      request_stream->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", status}}, true);
     } else {
-      request_stream->encodeHeaders(Http::TestHeaderMapImpl{{":status", status}}, false);
+      request_stream->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", status}}, false);
       Buffer::OwnedImpl responseBuffer(body);
       request_stream->encodeData(responseBuffer, true);
     }
@@ -62,10 +62,10 @@ public:
   FakeStreamPtr sendSquashOk(const std::string& body) { return sendSquash("200", body); }
 
   IntegrationStreamDecoderPtr sendDebugRequest(IntegrationCodecClientPtr& codec_client) {
-    Http::TestHeaderMapImpl headers{{":method", "GET"},
-                                    {":authority", "www.solo.io"},
-                                    {"x-squash-debug", "true"},
-                                    {":path", "/getsomething"}};
+    Http::TestRequestHeaderMapImpl headers{{":method", "GET"},
+                                           {":authority", "www.solo.io"},
+                                           {"x-squash-debug", "true"},
+                                           {":path", "/getsomething"}};
     return codec_client->makeHeaderOnlyRequest(headers);
   }
 
@@ -84,9 +84,9 @@ public:
 
     autonomous_upstream_ = true;
 
-    config_helper_.addFilter(ConfigHelper::DEFAULT_SQUASH_FILTER);
+    config_helper_.addFilter(ConfigHelper::defaultSquashFilter());
 
-    config_helper_.addConfigModifier([](envoy::config::bootstrap::v2::Bootstrap& bootstrap) {
+    config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
       auto* squash_cluster = bootstrap.mutable_static_resources()->add_clusters();
       squash_cluster->MergeFrom(bootstrap.static_resources().clusters()[0]);
       squash_cluster->set_name("squash");

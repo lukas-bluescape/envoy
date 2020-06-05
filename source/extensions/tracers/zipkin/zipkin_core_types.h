@@ -6,11 +6,14 @@
 #include "envoy/common/time.h"
 #include "envoy/network/address.h"
 
+#include "common/common/assert.h"
 #include "common/common/hex.h"
+#include "common/protobuf/utility.h"
 
 #include "extensions/tracers/zipkin/tracer_interface.h"
 #include "extensions/tracers/zipkin/util.h"
 
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 
@@ -28,13 +31,22 @@ public:
   /**
    * Destructor.
    */
-  virtual ~ZipkinBase() {}
+  virtual ~ZipkinBase() = default;
 
   /**
    * All classes defining Zipkin abstractions need to implement this method to convert
-   * the corresponding abstraction to a Zipkin-compliant JSON.
+   * the corresponding abstraction to a ProtobufWkt::Struct.
    */
-  virtual const std::string toJson() PURE;
+  virtual const ProtobufWkt::Struct toStruct() const PURE;
+
+  /**
+   * Serializes the a type as a Zipkin-compliant JSON representation as a string.
+   *
+   * @return a stringified JSON.
+   */
+  const std::string toJson() const {
+    return MessageUtil::getJsonStringFromMessage(toStruct(), false, true);
+  };
 };
 
 /**
@@ -56,7 +68,7 @@ public:
   /**
    * Default constructor. Creates an empty Endpoint.
    */
-  Endpoint() : service_name_(), address_(nullptr) {}
+  Endpoint() : address_(nullptr) {}
 
   /**
    * Constructor that initializes an endpoint with the given attributes.
@@ -88,11 +100,11 @@ public:
   void setServiceName(const std::string& service_name) { service_name_ = service_name; }
 
   /**
-   * Serializes the endpoint as a Zipkin-compliant JSON representation as a string.
+   * Represents the endpoint as a protobuf struct.
    *
-   * @return a stringified JSON.
+   * @return a protobuf struct.
    */
-  const std::string toJson() override;
+  const ProtobufWkt::Struct toStruct() const override;
 
 private:
   std::string service_name_;
@@ -118,7 +130,7 @@ public:
   /**
    * Default constructor. Creates an empty annotation.
    */
-  Annotation() : timestamp_(0), value_() {}
+  Annotation() = default;
 
   /**
    * Constructor that creates an annotation based on the given parameters.
@@ -180,14 +192,14 @@ public:
   bool isSetEndpoint() const { return endpoint_.has_value(); }
 
   /**
-   * Serializes the annotation as a Zipkin-compliant JSON representation as a string.
+   * Represents the annotation as a protobuf struct.
    *
-   * @return a stringified JSON.
+   * @return a protobuf struct.
    */
-  const std::string toJson() override;
+  const ProtobufWkt::Struct toStruct() const override;
 
 private:
-  uint64_t timestamp_;
+  uint64_t timestamp_{0};
   std::string value_;
   absl::optional<Endpoint> endpoint_;
 };
@@ -217,7 +229,7 @@ public:
   /**
    * Default constructor. Creates an empty binary annotation.
    */
-  BinaryAnnotation() : key_(), value_(), annotation_type_(STRING) {}
+  BinaryAnnotation() : annotation_type_(STRING) {}
 
   /**
    * Constructor that creates a binary annotation based on the given parameters.
@@ -236,7 +248,7 @@ public:
   /**
    * Sets the binary's annotation type.
    */
-  void setAnnotationType(AnnotationType annotationType) { annotation_type_ = annotationType; }
+  void setAnnotationType(AnnotationType annotation_type) { annotation_type_ = annotation_type; }
 
   /**
    * @return the annotation's endpoint attribute.
@@ -278,20 +290,20 @@ public:
   void setValue(const std::string& value) { value_ = value; }
 
   /**
-   * Serializes the binary annotation as a Zipkin-compliant JSON representation as a string.
+   * Represents the binary annotation as a protobuf struct.
    *
-   * @return a stringified JSON.
+   * @return a protobuf struct.
    */
-  const std::string toJson() override;
+  const ProtobufWkt::Struct toStruct() const override;
 
 private:
   std::string key_;
   std::string value_;
   absl::optional<Endpoint> endpoint_;
-  AnnotationType annotation_type_;
+  AnnotationType annotation_type_{};
 };
 
-typedef std::unique_ptr<Span> SpanPtr;
+using SpanPtr = std::unique_ptr<Span>;
 
 /**
  * Represents a Zipkin span. This class is based on Zipkin's Thrift definition of a span.
@@ -307,7 +319,7 @@ public:
    * Default constructor. Creates an empty span.
    */
   explicit Span(TimeSource& time_source)
-      : trace_id_(0), name_(), id_(0), debug_(false), sampled_(false), monotonic_start_time_(0),
+      : trace_id_(0), id_(0), debug_(false), sampled_(false), monotonic_start_time_(0),
         tracer_(nullptr), time_source_(time_source) {}
 
   /**
@@ -444,6 +456,11 @@ public:
   const std::string idAsHexString() const { return Hex::uint64ToHex(id_); }
 
   /**
+   * @return the span's id as a byte string.
+   */
+  const std::string idAsByteString() const { return Util::toByteString(id_); }
+
+  /**
    * @return the span's name.
    */
   const std::string& name() const { return name_; }
@@ -458,6 +475,14 @@ public:
    */
   const std::string parentIdAsHexString() const {
     return parent_id_ ? Hex::uint64ToHex(parent_id_.value()) : EMPTY_HEX_STRING_;
+  }
+
+  /**
+   * @return the span's parent id as a byte string.
+   */
+  const std::string parentIdAsByteString() const {
+    ASSERT(parent_id_);
+    return Util::toByteString(parent_id_.value());
   }
 
   /**
@@ -490,8 +515,19 @@ public:
    */
   const std::string traceIdAsHexString() const {
     return trace_id_high_.has_value()
-               ? Hex::uint64ToHex(trace_id_high_.value()) + Hex::uint64ToHex(trace_id_)
+               ? absl::StrCat(Hex::uint64ToHex(trace_id_high_.value()), Hex::uint64ToHex(trace_id_))
                : Hex::uint64ToHex(trace_id_);
+  }
+
+  /**
+   * @return the span's trace id as a byte string.
+   */
+  const std::string traceIdAsByteString() const {
+    // https://github.com/openzipkin/zipkin-api/blob/v0.2.1/zipkin.proto#L60-L61.
+    return trace_id_high_.has_value()
+               ? absl::StrCat(Util::toBigEndianByteString(trace_id_high_.value()),
+                              Util::toBigEndianByteString(trace_id_))
+               : Util::toBigEndianByteString(trace_id_);
   }
 
   /**
@@ -510,13 +546,11 @@ public:
   void setServiceName(const std::string& service_name);
 
   /**
-   * Serializes the span as a Zipkin-compliant JSON representation as a string.
-   * The resulting JSON string can be used as part of an HTTP POST call to
-   * send the span to Zipkin.
+   * Represents the binary annotation as a protobuf struct.
    *
-   * @return a stringified JSON.
+   * @return a protobuf struct.
    */
-  const std::string toJson() override;
+  const ProtobufWkt::Struct toStruct() const override;
 
   /**
    * Associates a Tracer object with the span. The tracer's reportSpan() method is invoked

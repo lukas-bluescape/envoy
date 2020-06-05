@@ -2,6 +2,7 @@
 
 #include "common/common/hex.h"
 #include "common/common/macros.h"
+#include "common/http/utility.h"
 
 #include "test/common/http/common.h"
 #include "test/test_common/environment.h"
@@ -58,20 +59,11 @@ void FrameUtils::fixupHeaders(Frame& frame) {
 }
 
 CodecFrameInjector::CodecFrameInjector(const std::string& injector_name)
-    : injector_name_(injector_name) {
-  settings_.hpack_table_size_ = Http2Settings::DEFAULT_HPACK_TABLE_SIZE;
-  settings_.max_concurrent_streams_ = Http2Settings::DEFAULT_MAX_CONCURRENT_STREAMS;
-  settings_.initial_stream_window_size_ = Http2Settings::DEFAULT_INITIAL_STREAM_WINDOW_SIZE;
-  settings_.initial_connection_window_size_ = Http2Settings::DEFAULT_INITIAL_CONNECTION_WINDOW_SIZE;
-  settings_.allow_metadata_ = false;
-}
+    : options_(::Envoy::Http2::Utility::initializeAndValidateOptions(
+          envoy::config::core::v3::Http2ProtocolOptions())),
+      injector_name_(injector_name) {}
 
 ClientCodecFrameInjector::ClientCodecFrameInjector() : CodecFrameInjector("server") {
-  auto client = std::make_unique<TestClientConnectionImpl>(client_connection_, client_callbacks_,
-                                                           stats_store_, settings_,
-                                                           Http::DEFAULT_MAX_REQUEST_HEADERS_KB);
-  request_encoder_ = &client->newStream(response_decoder_);
-  connection_ = std::move(client);
   ON_CALL(client_connection_, write(_, _))
       .WillByDefault(Invoke([&](Buffer::Instance& data, bool) -> void {
         ENVOY_LOG_MISC(
@@ -79,22 +71,15 @@ ClientCodecFrameInjector::ClientCodecFrameInjector() : CodecFrameInjector("serve
             Hex::encode(static_cast<uint8_t*>(data.linearize(data.length())), data.length()));
         data.drain(data.length());
       }));
-  request_encoder_->getStream().addCallbacks(client_stream_callbacks_);
-  // Setup a single stream to inject frames as a reply to.
-  TestHeaderMapImpl request_headers;
-  HttpTestUtility::addDefaultHeaders(request_headers);
-  request_encoder_->encodeHeaders(request_headers, true);
 }
 
 ServerCodecFrameInjector::ServerCodecFrameInjector() : CodecFrameInjector("client") {
-  connection_ = std::make_unique<TestServerConnectionImpl>(server_connection_, server_callbacks_,
-                                                           stats_store_, settings_,
-                                                           Http::DEFAULT_MAX_REQUEST_HEADERS_KB);
   EXPECT_CALL(server_callbacks_, newStream(_, _))
-      .WillRepeatedly(Invoke([&](StreamEncoder& encoder, bool) -> StreamDecoder& {
+      .WillRepeatedly(Invoke([&](ResponseEncoder& encoder, bool) -> RequestDecoder& {
         encoder.getStream().addCallbacks(server_stream_callbacks_);
         return request_decoder_;
       }));
+
   ON_CALL(server_connection_, write(_, _))
       .WillByDefault(Invoke([&](Buffer::Instance& data, bool) -> void {
         ENVOY_LOG_MISC(
@@ -104,12 +89,12 @@ ServerCodecFrameInjector::ServerCodecFrameInjector() : CodecFrameInjector("clien
       }));
 }
 
-void CodecFrameInjector::write(const Frame& frame) {
+void CodecFrameInjector::write(const Frame& frame, Http::Connection& connection) {
   Buffer::OwnedImpl buffer;
   buffer.add(frame.data(), frame.size());
   ENVOY_LOG_MISC(trace, "{} write: {}", injector_name_, Hex::encode(frame.data(), frame.size()));
   while (buffer.length() > 0) {
-    connection_->dispatch(buffer);
+    connection.dispatch(buffer);
   }
 }
 

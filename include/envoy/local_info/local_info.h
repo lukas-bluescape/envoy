@@ -2,8 +2,8 @@
 
 #include <string>
 
-#include "envoy/api/v2/core/base.pb.h"
 #include "envoy/common/pure.h"
+#include "envoy/config/core/v3/base.pb.h"
 #include "envoy/network/address.h"
 
 namespace Envoy {
@@ -14,7 +14,7 @@ namespace LocalInfo {
  */
 class LocalInfo {
 public:
-  virtual ~LocalInfo() {}
+  virtual ~LocalInfo() = default;
 
   /**
    * @return the local (non-loopback) address of the server.
@@ -39,10 +39,10 @@ public:
   /**
    * v2 API Node protobuf. This is the full node identity presented to management servers.
    */
-  virtual const envoy::api::v2::core::Node& node() const PURE;
+  virtual const envoy::config::core::v3::Node& node() const PURE;
 };
 
-typedef std::unique_ptr<LocalInfo> LocalInfoPtr;
+using LocalInfoPtr = std::unique_ptr<LocalInfo>;
 
 } // namespace LocalInfo
 } // namespace Envoy

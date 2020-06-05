@@ -174,6 +174,25 @@ public:
     return copy_size;
   }
 
+  /**
+   * @return true if content in this Slice can be coalesced into another Slice.
+   */
+  virtual bool canCoalesce() const { return true; }
+
+  /**
+   * Describe the in-memory representation of the slice. For use
+   * in tests that want to make assertions about the specific arrangement of
+   * bytes in a slice.
+   */
+  struct SliceRepresentation {
+    uint64_t data;
+    uint64_t reservable;
+    uint64_t capacity;
+  };
+  SliceRepresentation describeSliceForTest() const {
+    return SliceRepresentation{dataSize(), reservableSize(), capacity_};
+  }
+
 protected:
   Slice(uint64_t data, uint64_t reservable, uint64_t capacity)
       : data_(data), reservable_(reservable), capacity_(capacity) {}
@@ -193,7 +212,8 @@ protected:
 
 using SlicePtr = std::unique_ptr<Slice>;
 
-class OwnedSlice : public Slice, public InlineStorage {
+// OwnedSlice can not be derived from as it has variable sized array as member.
+class OwnedSlice final : public Slice, public InlineStorage {
 public:
   /**
    * Create an empty OwnedSlice.
@@ -341,9 +361,9 @@ public:
     size_t index_;
   };
 
-  ConstIterator begin() const noexcept { return ConstIterator(*this, 0); }
+  ConstIterator begin() const noexcept { return {*this, 0}; }
 
-  ConstIterator end() const noexcept { return ConstIterator(*this, size_); }
+  ConstIterator end() const noexcept { return {*this, size_}; }
 
 private:
   constexpr static size_t InlineRingCapacity = 8;
@@ -400,6 +420,13 @@ public:
 
   ~UnownedSlice() override { fragment_.done(); }
 
+  /**
+   * BufferFragment objects encapsulated by UnownedSlice are used to track when response content
+   * is written into transport connection. As a result these slices can not be coalesced when moved
+   * between buffers.
+   */
+  bool canCoalesce() const override { return false; }
+
 private:
   BufferFragment& fragment_;
 };
@@ -441,8 +468,6 @@ private:
 
 class LibEventInstance : public Instance {
 public:
-  // Allows access into the underlying buffer for move() optimizations.
-  virtual Event::Libevent::BufferPtr& buffer() PURE;
   // Called after accessing the memory in buffer() directly to allow any post-processing.
   virtual void postProcess() PURE;
 };
@@ -494,7 +519,7 @@ public:
   void commit(RawSlice* iovecs, uint64_t num_iovecs) override;
   void copyOut(size_t start, uint64_t size, void* data) const override;
   void drain(uint64_t size) override;
-  uint64_t getRawSlices(RawSlice* out, uint64_t out_size) const override;
+  RawSliceVector getRawSlices(absl::optional<uint64_t> max_slices = absl::nullopt) const override;
   uint64_t length() const override;
   void* linearize(uint32_t size) override;
   void move(Instance& rhs) override;
@@ -502,12 +527,12 @@ public:
   Api::IoCallUint64Result read(Network::IoHandle& io_handle, uint64_t max_length) override;
   uint64_t reserve(uint64_t length, RawSlice* iovecs, uint64_t num_iovecs) override;
   ssize_t search(const void* data, uint64_t size, size_t start) const override;
+  bool startsWith(absl::string_view data) const override;
   Api::IoCallUint64Result write(Network::IoHandle& io_handle) override;
   std::string toString() const override;
 
   // LibEventInstance
-  Event::Libevent::BufferPtr& buffer() override { return buffer_; }
-  virtual void postProcess() override;
+  void postProcess() override;
 
   /**
    * Create a new slice at the end of the buffer, and copy the supplied content into it.
@@ -522,22 +547,12 @@ public:
    */
   void appendSliceForTest(absl::string_view data);
 
-  // Support for choosing the buffer implementation at runtime.
-  // TODO(brian-pane) remove this once the new implementation has been
-  // running in production for a while.
-
-  /** @return whether this buffer uses the old evbuffer-based implementation. */
-  bool usesOldImpl() const { return old_impl_; }
-
   /**
-   * @param use_old_impl whether to use the evbuffer-based implementation for new buffers
-   * @warning Except for testing code, this method should be called at most once per process,
-   *          before any OwnedImpl objects are created. The reason is that it is unsafe to
-   *          mix and match buffers with different implementations. The move() method,
-   *          in particular, only works if the source and destination objects are using
-   *          the same destination.
+   * Describe the in-memory representation of the slices in the buffer. For use
+   * in tests that want to make assertions about the specific arrangement of
+   * bytes in the buffer.
    */
-  static void useOldImpl(bool use_old_impl);
+  std::vector<OwnedSlice::SliceRepresentation> describeSlicesForTest() const;
 
 private:
   /**
@@ -547,21 +562,62 @@ private:
    */
   bool isSameBufferImpl(const Instance& rhs) const;
 
-  /** Whether to use the old evbuffer implementation when constructing new OwnedImpl objects. */
-  static bool use_old_impl_;
+  void addImpl(const void* data, uint64_t size);
 
-  /** Whether this buffer uses the old evbuffer implementation. */
-  bool old_impl_;
+  /**
+   * Moves contents of the `other_slice` by either taking its ownership or coalescing it
+   * into an existing slice.
+   * NOTE: the caller is responsible for draining the buffer that contains the `other_slice`.
+   */
+  void coalesceOrAddSlice(SlicePtr&& other_slice);
 
   /** Ring buffer of slices. */
   SliceDeque slices_;
 
   /** Sum of the dataSize of all slices. */
   OverflowDetectingUInt64 length_;
-
-  /** Used when old_impl_==true */
-  Event::Libevent::BufferPtr buffer_;
 };
+
+using BufferFragmentPtr = std::unique_ptr<BufferFragment>;
+
+/**
+ * An implementation of BufferFragment where a releasor callback is called when the data is
+ * no longer needed. Copies data into internal buffer.
+ */
+class OwnedBufferFragmentImpl final : public BufferFragment, public InlineStorage {
+public:
+  using Releasor = std::function<void(const OwnedBufferFragmentImpl*)>;
+
+  /**
+   * Copies the data into internal buffer. The releasor is called when the data has been
+   * fully drained or the buffer that contains this fragment is destroyed.
+   * @param data external data to reference
+   * @param releasor a callback function to be called when data is no longer needed.
+   */
+
+  static BufferFragmentPtr create(absl::string_view data, const Releasor& releasor) {
+    return BufferFragmentPtr(new (sizeof(OwnedBufferFragmentImpl) + data.size())
+                                 OwnedBufferFragmentImpl(data, releasor));
+  }
+
+  // Buffer::BufferFragment
+  const void* data() const override { return data_; }
+  size_t size() const override { return size_; }
+  void done() override { releasor_(this); }
+
+private:
+  OwnedBufferFragmentImpl(absl::string_view data, const Releasor& releasor)
+      : releasor_(releasor), size_(data.size()) {
+    ASSERT(releasor != nullptr);
+    memcpy(data_, data.data(), data.size());
+  }
+
+  const Releasor releasor_;
+  const size_t size_;
+  uint8_t data_[];
+};
+
+using OwnedBufferFragmentImplPtr = std::unique_ptr<OwnedBufferFragmentImpl>;
 
 } // namespace Buffer
 } // namespace Envoy

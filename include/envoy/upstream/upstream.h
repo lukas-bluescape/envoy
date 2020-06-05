@@ -8,8 +8,10 @@
 #include <string>
 #include <vector>
 
-#include "envoy/api/v2/core/base.pb.h"
 #include "envoy/common/callback.h"
+#include "envoy/config/cluster/v3/cluster.pb.h"
+#include "envoy/config/core/v3/base.pb.h"
+#include "envoy/config/core/v3/protocol.pb.h"
 #include "envoy/config/typed_metadata.h"
 #include "envoy/http/codec.h"
 #include "envoy/network/connection.h"
@@ -24,6 +26,7 @@
 #include "envoy/upstream/resource_manager.h"
 #include "envoy/upstream/types.h"
 
+#include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 
 namespace Envoy {
@@ -77,12 +80,15 @@ public:
   /**
    * @return host specific counters.
    */
-  virtual std::vector<Stats::CounterSharedPtr> counters() const PURE;
+  virtual std::vector<std::pair<absl::string_view, Stats::PrimitiveCounterReference>>
+  counters() const PURE;
 
   /**
    * Create a connection for this host.
    * @param dispatcher supplies the owning dispatcher.
    * @param options supplies the socket options that will be set on the new connection.
+   * @param transport_socket_options supplies the transport options that will be set on the new
+   * connection.
    * @return the connection data which includes the raw network connection as well as the *real*
    *         host that backs it. The reason why a 2nd host is returned is that some hosts are
    *         logical and wrap multiple real network destinations. In this case, a different host
@@ -97,15 +103,19 @@ public:
   /**
    * Create a health check connection for this host.
    * @param dispatcher supplies the owning dispatcher.
+   * @param transport_socket_options supplies the transport options that will be set on the new
+   * connection.
    * @return the connection data.
    */
-  virtual CreateConnectionData
-  createHealthCheckConnection(Event::Dispatcher& dispatcher) const PURE;
+  virtual CreateConnectionData createHealthCheckConnection(
+      Event::Dispatcher& dispatcher,
+      Network::TransportSocketOptionsSharedPtr transport_socket_options) const PURE;
 
   /**
    * @return host specific gauges.
    */
-  virtual std::vector<Stats::GaugeSharedPtr> gauges() const PURE;
+  virtual std::vector<std::pair<absl::string_view, Stats::PrimitiveGaugeReference>>
+  gauges() const PURE;
 
   /**
    * Atomically clear a health flag for a host. Flags are specified in HealthFlags.
@@ -194,31 +204,31 @@ public:
   virtual void used(bool new_used) PURE;
 };
 
-typedef std::shared_ptr<const Host> HostConstSharedPtr;
+using HostConstSharedPtr = std::shared_ptr<const Host>;
 
-typedef std::vector<HostSharedPtr> HostVector;
-typedef Phantom<HostVector, Healthy> HealthyHostVector;
-typedef Phantom<HostVector, Degraded> DegradedHostVector;
-typedef Phantom<HostVector, Excluded> ExcludedHostVector;
-typedef std::unordered_map<std::string, Upstream::HostSharedPtr> HostMap;
-typedef std::shared_ptr<HostVector> HostVectorSharedPtr;
-typedef std::shared_ptr<const HostVector> HostVectorConstSharedPtr;
+using HostVector = std::vector<HostSharedPtr>;
+using HealthyHostVector = Phantom<HostVector, Healthy>;
+using DegradedHostVector = Phantom<HostVector, Degraded>;
+using ExcludedHostVector = Phantom<HostVector, Excluded>;
+using HostMap = std::unordered_map<std::string, Upstream::HostSharedPtr>;
+using HostVectorSharedPtr = std::shared_ptr<HostVector>;
+using HostVectorConstSharedPtr = std::shared_ptr<const HostVector>;
 
-typedef std::shared_ptr<const HealthyHostVector> HealthyHostVectorConstSharedPtr;
-typedef std::shared_ptr<const DegradedHostVector> DegradedHostVectorConstSharedPtr;
-typedef std::shared_ptr<const ExcludedHostVector> ExcludedHostVectorConstSharedPtr;
+using HealthyHostVectorConstSharedPtr = std::shared_ptr<const HealthyHostVector>;
+using DegradedHostVectorConstSharedPtr = std::shared_ptr<const DegradedHostVector>;
+using ExcludedHostVectorConstSharedPtr = std::shared_ptr<const ExcludedHostVector>;
 
-typedef std::unique_ptr<HostVector> HostListPtr;
-typedef std::unordered_map<envoy::api::v2::core::Locality, uint32_t, LocalityHash, LocalityEqualTo>
-    LocalityWeightsMap;
-typedef std::vector<std::pair<HostListPtr, LocalityWeightsMap>> PriorityState;
+using HostListPtr = std::unique_ptr<HostVector>;
+using LocalityWeightsMap =
+    std::unordered_map<envoy::config::core::v3::Locality, uint32_t, LocalityHash, LocalityEqualTo>;
+using PriorityState = std::vector<std::pair<HostListPtr, LocalityWeightsMap>>;
 
 /**
  * Bucket hosts by locality.
  */
 class HostsPerLocality {
 public:
-  virtual ~HostsPerLocality() {}
+  virtual ~HostsPerLocality() = default;
 
   /**
    * @return bool is local locality one of the locality buckets? If so, the
@@ -252,13 +262,13 @@ public:
   }
 };
 
-typedef std::shared_ptr<HostsPerLocality> HostsPerLocalitySharedPtr;
-typedef std::shared_ptr<const HostsPerLocality> HostsPerLocalityConstSharedPtr;
+using HostsPerLocalitySharedPtr = std::shared_ptr<HostsPerLocality>;
+using HostsPerLocalityConstSharedPtr = std::shared_ptr<const HostsPerLocality>;
 
 // Weight for each locality index in HostsPerLocality.
-typedef std::vector<uint32_t> LocalityWeights;
-typedef std::shared_ptr<LocalityWeights> LocalityWeightsSharedPtr;
-typedef std::shared_ptr<const LocalityWeights> LocalityWeightsConstSharedPtr;
+using LocalityWeights = std::vector<uint32_t>;
+using LocalityWeightsSharedPtr = std::shared_ptr<LocalityWeights>;
+using LocalityWeightsConstSharedPtr = std::shared_ptr<const LocalityWeights>;
 
 /**
  * Base host set interface. This contains all of the endpoints for a given LocalityLbEndpoints
@@ -267,7 +277,7 @@ typedef std::shared_ptr<const LocalityWeights> LocalityWeightsConstSharedPtr;
 // TODO(snowp): Remove the const ref accessors in favor of the shared_ptr ones.
 class HostSet {
 public:
-  virtual ~HostSet() {}
+  virtual ~HostSet() = default;
 
   /**
    * @return all hosts that make up the set at the current time.
@@ -384,7 +394,7 @@ public:
   virtual uint32_t overprovisioningFactor() const PURE;
 };
 
-typedef std::unique_ptr<HostSet> HostSetPtr;
+using HostSetPtr = std::unique_ptr<HostSet>;
 
 /**
  * This class contains all of the HostSets for a given cluster grouped by priority, for
@@ -392,14 +402,13 @@ typedef std::unique_ptr<HostSet> HostSetPtr;
  */
 class PrioritySet {
 public:
-  typedef std::function<void(const HostVector& hosts_added, const HostVector& hosts_removed)>
-      MemberUpdateCb;
+  using MemberUpdateCb =
+      std::function<void(const HostVector& hosts_added, const HostVector& hosts_removed)>;
 
-  typedef std::function<void(uint32_t priority, const HostVector& hosts_added,
-                             const HostVector& hosts_removed)>
-      PriorityUpdateCb;
+  using PriorityUpdateCb = std::function<void(uint32_t priority, const HostVector& hosts_added,
+                                              const HostVector& hosts_removed)>;
 
-  virtual ~PrioritySet() {}
+  virtual ~PrioritySet() = default;
 
   /**
    * Install a callback that will be invoked when any of the HostSets in the PrioritySet changes.
@@ -461,7 +470,7 @@ public:
    */
   class HostUpdateCb {
   public:
-    virtual ~HostUpdateCb() {}
+    virtual ~HostUpdateCb() = default;
     /**
      * Updates the hosts in a given host set.
      *
@@ -483,7 +492,7 @@ public:
    */
   class BatchUpdateCb {
   public:
-    virtual ~BatchUpdateCb() {}
+    virtual ~BatchUpdateCb() = default;
 
     /**
      * Performs a batch host update. Implementors should use the provided callback to update hosts
@@ -566,6 +575,7 @@ public:
   COUNTER(upstream_rq_pending_total)                                                               \
   COUNTER(upstream_rq_per_try_timeout)                                                             \
   COUNTER(upstream_rq_retry)                                                                       \
+  COUNTER(upstream_rq_retry_limit_exceeded)                                                        \
   COUNTER(upstream_rq_retry_overflow)                                                              \
   COUNTER(upstream_rq_retry_success)                                                               \
   COUNTER(upstream_rq_rx_reset)                                                                    \
@@ -584,8 +594,8 @@ public:
   GAUGE(upstream_rq_active, Accumulate)                                                            \
   GAUGE(upstream_rq_pending_active, Accumulate)                                                    \
   GAUGE(version, NeverImport)                                                                      \
-  HISTOGRAM(upstream_cx_connect_ms)                                                                \
-  HISTOGRAM(upstream_cx_length_ms)
+  HISTOGRAM(upstream_cx_connect_ms, Milliseconds)                                                  \
+  HISTOGRAM(upstream_cx_length_ms, Milliseconds)
 
 /**
  * All cluster load report stats. These are only use for EDS load reporting and not sent to the
@@ -611,6 +621,13 @@ public:
   REMAINING_GAUGE(remaining_rq, Accumulate)
 
 /**
+ * All stats around timeout budgets. Not used by default.
+ */
+#define ALL_CLUSTER_TIMEOUT_BUDGET_STATS(HISTOGRAM)                                                \
+  HISTOGRAM(upstream_rq_timeout_budget_percent_used, Unspecified)                                  \
+  HISTOGRAM(upstream_rq_timeout_budget_per_try_percent_used, Unspecified)
+
+/**
  * Struct definition for all cluster stats. @see stats_macros.h
  */
 struct ClusterStats {
@@ -632,15 +649,22 @@ struct ClusterCircuitBreakersStats {
 };
 
 /**
+ * Struct definition for cluster timeout budget stats. @see stats_macros.h
+ */
+struct ClusterTimeoutBudgetStats {
+  ALL_CLUSTER_TIMEOUT_BUDGET_STATS(GENERATE_HISTOGRAM_STRUCT)
+};
+
+/**
  * All extension protocol specific options returned by the method at
  *   NamedNetworkFilterConfigFactory::createProtocolOptions
  * must be derived from this class.
  */
 class ProtocolOptionsConfig {
 public:
-  virtual ~ProtocolOptionsConfig() {}
+  virtual ~ProtocolOptionsConfig() = default;
 };
-typedef std::shared_ptr<const ProtocolOptionsConfig> ProtocolOptionsConfigConstSharedPtr;
+using ProtocolOptionsConfigConstSharedPtr = std::shared_ptr<const ProtocolOptionsConfig>;
 
 /**
  *  Base class for all cluster typed metadata factory.
@@ -662,7 +686,7 @@ public:
     static const uint64_t CLOSE_CONNECTIONS_ON_HOST_HEALTH_FAILURE = 0x4;
   };
 
-  virtual ~ClusterInfo() {}
+  virtual ~ClusterInfo() = default;
 
   /**
    * @return bool whether the cluster was added via API (if false the cluster was present in the
@@ -691,10 +715,17 @@ public:
   virtual uint64_t features() const PURE;
 
   /**
-   * @return const Http::Http2Settings& for HTTP/2 connections created on behalf of this cluster.
-   *         @see Http::Http2Settings.
+   * @return const Http::Http1Settings& for HTTP/1.1 connections created on behalf of this cluster.
+   *         @see Http::Http1Settings.
    */
-  virtual const Http::Http2Settings& http2Settings() const PURE;
+  virtual const Http::Http1Settings& http1Settings() const PURE;
+
+  /**
+   * @return const envoy::config::core::v3::Http2ProtocolOptions& for HTTP/2 connections
+   * created on behalf of this cluster.
+   *         @see envoy::config::core::v3::Http2ProtocolOptions.
+   */
+  virtual const envoy::config::core::v3::Http2ProtocolOptions& http2Options() const PURE;
 
   /**
    * @param name std::string containing the well-known name of the extension for which protocol
@@ -712,7 +743,7 @@ public:
    * @return const envoy::api::v2::Cluster::CommonLbConfig& the common configuration for all
    *         load balancers for this cluster.
    */
-  virtual const envoy::api::v2::Cluster::CommonLbConfig& lbConfig() const PURE;
+  virtual const envoy::config::cluster::v3::Cluster::CommonLbConfig& lbConfig() const PURE;
 
   /**
    * @return the type of load balancing that the cluster should use.
@@ -722,24 +753,24 @@ public:
   /**
    * @return the service discovery type to use for resolving the cluster.
    */
-  virtual envoy::api::v2::Cluster::DiscoveryType type() const PURE;
+  virtual envoy::config::cluster::v3::Cluster::DiscoveryType type() const PURE;
 
   /**
    * @return the type of cluster, only used for custom discovery types.
    */
-  virtual const absl::optional<envoy::api::v2::Cluster::CustomClusterType>&
+  virtual const absl::optional<envoy::config::cluster::v3::Cluster::CustomClusterType>&
   clusterType() const PURE;
 
   /**
    * @return configuration for least request load balancing, only used if LB type is least request.
    */
-  virtual const absl::optional<envoy::api::v2::Cluster::LeastRequestLbConfig>&
+  virtual const absl::optional<envoy::config::cluster::v3::Cluster::LeastRequestLbConfig>&
   lbLeastRequestConfig() const PURE;
 
   /**
    * @return configuration for ring hash load balancing, only used if type is set to ring_hash_lb.
    */
-  virtual const absl::optional<envoy::api::v2::Cluster::RingHashLbConfig>&
+  virtual const absl::optional<envoy::config::cluster::v3::Cluster::RingHashLbConfig>&
   lbRingHashConfig() const PURE;
 
   /**
@@ -747,7 +778,7 @@ public:
    *         for the Original Destination load balancing policy, only used if type is set to
    *         ORIGINAL_DST_LB.
    */
-  virtual const absl::optional<envoy::api::v2::Cluster::OriginalDstLbConfig>&
+  virtual const absl::optional<envoy::config::cluster::v3::Cluster::OriginalDstLbConfig>&
   lbOriginalDstConfig() const PURE;
 
   /**
@@ -766,6 +797,12 @@ public:
   virtual uint64_t maxRequestsPerConnection() const PURE;
 
   /**
+   * @return uint32_t the maximum number of response headers. The default value is 100. Results in a
+   * reset if the number of headers exceeds this value.
+   */
+  virtual uint32_t maxResponseHeadersCount() const PURE;
+
+  /**
    * @return the human readable name of the cluster.
    */
   virtual const std::string& name() const PURE;
@@ -777,10 +814,10 @@ public:
   virtual ResourceManager& resourceManager(ResourcePriority priority) const PURE;
 
   /**
-   * @return Network::TransportSocketFactory& the factory of transport socket to use when
-   *         communicating with the cluster.
+   * @return TransportSocketMatcher& the transport socket matcher associated
+   * factory.
    */
-  virtual Network::TransportSocketFactory& transportSocketFactory() const PURE;
+  virtual TransportSocketMatcher& transportSocketMatcher() const PURE;
 
   /**
    * @return ClusterStats& strongly named stats for this cluster.
@@ -799,6 +836,11 @@ public:
   virtual ClusterLoadReportStats& loadReportStats() const PURE;
 
   /**
+   * @return absl::optional<ClusterTimeoutBudgetStats>& stats on timeout budgets for this cluster.
+   */
+  virtual const absl::optional<ClusterTimeoutBudgetStats>& timeoutBudgetStats() const PURE;
+
+  /**
    * Returns an optional source address for upstream connections to bind to.
    *
    * @return a source address to bind to or nullptr if no bind need occur.
@@ -813,7 +855,7 @@ public:
   /**
    * @return const envoy::api::v2::core::Metadata& the configuration metadata for this cluster.
    */
-  virtual const envoy::api::v2::core::Metadata& metadata() const PURE;
+  virtual const envoy::config::core::v3::Metadata& metadata() const PURE;
 
   /**
    * @return const Envoy::Config::TypedMetadata&& the typed metadata for this cluster.
@@ -844,6 +886,23 @@ public:
    */
   virtual absl::optional<std::string> eds_service_name() const PURE;
 
+  /**
+   * Create network filters on a new upstream connection.
+   */
+  virtual void createNetworkFilterChain(Network::Connection& connection) const PURE;
+
+  /**
+   * Calculate upstream protocol based on features.
+   */
+  virtual Http::Protocol
+  upstreamHttpProtocol(absl::optional<Http::Protocol> downstream_protocol) const PURE;
+
+  /**
+   * @return http protocol options for upstream connection
+   */
+  virtual const absl::optional<envoy::config::core::v3::UpstreamHttpProtocolOptions>&
+  upstreamHttpProtocolOptions() const PURE;
+
 protected:
   /**
    * Invoked by extensionProtocolOptionsTyped.
@@ -856,7 +915,7 @@ protected:
   extensionProtocolOptions(const std::string& name) const PURE;
 };
 
-typedef std::shared_ptr<const ClusterInfo> ClusterInfoConstSharedPtr;
+using ClusterInfoConstSharedPtr = std::shared_ptr<const ClusterInfo>;
 
 class HealthChecker;
 
@@ -866,7 +925,7 @@ class HealthChecker;
  */
 class Cluster {
 public:
-  virtual ~Cluster() {}
+  virtual ~Cluster() = default;
 
   enum class InitializePhase { Primary, Secondary };
 
@@ -915,7 +974,7 @@ public:
   virtual const PrioritySet& prioritySet() const PURE;
 };
 
-typedef std::shared_ptr<Cluster> ClusterSharedPtr;
+using ClusterSharedPtr = std::shared_ptr<Cluster>;
 
 } // namespace Upstream
 } // namespace Envoy

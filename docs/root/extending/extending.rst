@@ -3,10 +3,11 @@
 Extending Envoy for custom use cases
 ====================================
 
-The Envoy architecture makes it fairly easily extensible via a variety of differerent extension
+The Envoy architecture makes it fairly easily extensible via a variety of different extension
 types including:
 
 * :ref:`Access loggers <arch_overview_access_logs>`
+* :ref:`Access log filters <arch_overview_access_log_filters>`
 * :ref:`Clusters <arch_overview_service_discovery>`
 * :ref:`Listener filters <arch_overview_listener_filters>`
 * :ref:`Network filters <arch_overview_network_filters>`
@@ -17,7 +18,9 @@ types including:
 * :ref:`Retry implementations <arch_overview_http_routing_retry>`
 * :ref:`Stat sinks <arch_overview_statistics>`
 * :ref:`Tracers <arch_overview_tracing>`
+* :ref:`Request ID <arch_overview_tracing>`
 * Transport sockets
+* BoringSSL private key methods
 
 As of this writing there is no high level extension developer documentation. The
 :repo:`existing extensions <source/extensions>` are a good way to learn what is possible.

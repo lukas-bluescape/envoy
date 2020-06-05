@@ -5,7 +5,6 @@
 #include <vector>
 
 #include "envoy/common/pure.h"
-#include "envoy/config/filter/network/redis_proxy/v2/redis_proxy.pb.h"
 
 #include "extensions/filters/network/redis_proxy/conn_pool.h"
 
@@ -35,9 +34,9 @@ public:
   virtual bool shouldMirror(const std::string& command) const PURE;
 };
 
-typedef std::shared_ptr<const MirrorPolicy> MirrorPolicyConstSharedPtr;
+using MirrorPolicyConstSharedPtr = std::shared_ptr<const MirrorPolicy>;
 
-typedef std::vector<MirrorPolicyConstSharedPtr> MirrorPolicies;
+using MirrorPolicies = std::vector<MirrorPolicyConstSharedPtr>;
 
 /**
  * An resolved route that wraps an upstream connection pool and list of mirror policies
@@ -51,7 +50,7 @@ public:
   virtual const MirrorPolicies& mirrorPolicies() const PURE;
 };
 
-typedef std::shared_ptr<Route> RouteSharedPtr;
+using RouteSharedPtr = std::shared_ptr<Route>;
 
 /*
  * Decorator of a connection pool in order to enable key based routing.
@@ -69,7 +68,7 @@ public:
   virtual RouteSharedPtr upstreamPool(std::string& key) PURE;
 };
 
-typedef std::unique_ptr<Router> RouterPtr;
+using RouterPtr = std::unique_ptr<Router>;
 
 } // namespace RedisProxy
 } // namespace NetworkFilters

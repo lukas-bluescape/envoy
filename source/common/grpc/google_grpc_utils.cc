@@ -5,19 +5,46 @@
 #include <cstring>
 #include <string>
 
+#include "envoy/grpc/google_grpc_creds.h"
+#include "envoy/registry/registry.h"
+
 #include "common/buffer/buffer_impl.h"
 #include "common/common/assert.h"
 #include "common/common/empty_string.h"
 #include "common/common/enum_to_int.h"
 #include "common/common/fmt.h"
 #include "common/common/macros.h"
-#include "common/common/stack_array.h"
 #include "common/common/utility.h"
 
+#include "absl/container/fixed_array.h"
 #include "absl/strings/match.h"
 
 namespace Envoy {
 namespace Grpc {
+
+namespace {
+
+std::shared_ptr<grpc::ChannelCredentials>
+getGoogleGrpcChannelCredentials(const envoy::config::core::v3::GrpcService& grpc_service,
+                                Api::Api& api) {
+  GoogleGrpcCredentialsFactory* credentials_factory = nullptr;
+  const std::string& google_grpc_credentials_factory_name =
+      grpc_service.google_grpc().credentials_factory_name();
+  if (google_grpc_credentials_factory_name.empty()) {
+    credentials_factory = Registry::FactoryRegistry<GoogleGrpcCredentialsFactory>::getFactory(
+        "envoy.grpc_credentials.default");
+  } else {
+    credentials_factory = Registry::FactoryRegistry<GoogleGrpcCredentialsFactory>::getFactory(
+        google_grpc_credentials_factory_name);
+  }
+  if (credentials_factory == nullptr) {
+    throw EnvoyException(absl::StrCat("Unknown google grpc credentials factory: ",
+                                      google_grpc_credentials_factory_name));
+  }
+  return credentials_factory->getChannelCredentials(grpc_service, api);
+}
+
+} // namespace
 
 struct BufferInstanceContainer {
   BufferInstanceContainer(int ref_count, Buffer::InstancePtr&& buffer)
@@ -39,35 +66,33 @@ grpc::ByteBuffer GoogleGrpcUtils::makeByteBuffer(Buffer::InstancePtr&& buffer_in
   if (!buffer_instance) {
     return {};
   }
-  Buffer::RawSlice on_raw_slice;
-  // NB: we need to pass in >= 1 in order to get the real "n" (see Buffer::Instance for details).
-  const int n_slices = buffer_instance->getRawSlices(&on_raw_slice, 1);
-  if (n_slices <= 0) {
+  Buffer::RawSliceVector raw_slices = buffer_instance->getRawSlices();
+  if (raw_slices.empty()) {
     return {};
   }
-  auto* container = new BufferInstanceContainer{n_slices, std::move(buffer_instance)};
-  if (n_slices == 1) {
-    grpc::Slice one_slice(on_raw_slice.mem_, on_raw_slice.len_,
-                          &BufferInstanceContainer::derefBufferInstanceContainer, container);
-    return {&one_slice, 1};
-  }
-  STACK_ARRAY(many_raw_slices, Buffer::RawSlice, n_slices);
-  container->buffer_->getRawSlices(many_raw_slices.begin(), n_slices);
+
+  auto* container =
+      new BufferInstanceContainer{static_cast<int>(raw_slices.size()), std::move(buffer_instance)};
   std::vector<grpc::Slice> slices;
-  slices.reserve(n_slices);
-  for (int i = 0; i < n_slices; i++) {
-    slices.emplace_back(many_raw_slices[i].mem_, many_raw_slices[i].len_,
+  slices.reserve(raw_slices.size());
+  for (Buffer::RawSlice& raw_slice : raw_slices) {
+    slices.emplace_back(raw_slice.mem_, raw_slice.len_,
                         &BufferInstanceContainer::derefBufferInstanceContainer, container);
   }
   return {&slices[0], slices.size()};
 }
 
-struct ByteBufferContainer {
-  ByteBufferContainer(int ref_count) : ref_count_(ref_count) {}
-  ~ByteBufferContainer() { ::free(fragments_); }
-  uint32_t ref_count_;
-  Buffer::BufferFragmentImpl* fragments_ = nullptr;
-  std::vector<grpc::Slice> slices_;
+class GrpcSliceBufferFragmentImpl : public Buffer::BufferFragment {
+public:
+  explicit GrpcSliceBufferFragmentImpl(grpc::Slice&& slice) : slice_(std::move(slice)) {}
+
+  // Buffer::BufferFragment
+  const void* data() const override { return slice_.begin(); }
+  size_t size() const override { return slice_.size(); }
+  void done() override { delete this; }
+
+private:
+  const grpc::Slice slice_;
 };
 
 Buffer::InstancePtr GoogleGrpcUtils::makeBufferInstance(const grpc::ByteBuffer& byte_buffer) {
@@ -81,29 +106,17 @@ Buffer::InstancePtr GoogleGrpcUtils::makeBufferInstance(const grpc::ByteBuffer& 
   if (!byte_buffer.Dump(&slices).ok()) {
     return nullptr;
   }
-  auto* container = new ByteBufferContainer(static_cast<int>(slices.size()));
-  std::function<void(const void*, size_t, const Buffer::BufferFragmentImpl*)> releaser =
-      [container](const void*, size_t, const Buffer::BufferFragmentImpl*) {
-        container->ref_count_--;
-        if (container->ref_count_ <= 0) {
-          delete container;
-        }
-      };
-  // NB: addBufferFragment takes a pointer alias to the BufferFragmentImpl which is passed in so we
-  // need to ensure that the lifetime of those objects exceeds that of the Buffer::Instance.
-  RELEASE_ASSERT(!::posix_memalign(reinterpret_cast<void**>(&container->fragments_),
-                                   alignof(Buffer::BufferFragmentImpl),
-                                   sizeof(Buffer::BufferFragmentImpl) * slices.size()),
-                 "posix_memalign failure");
-  for (size_t i = 0; i < slices.size(); i++) {
-    new (&container->fragments_[i])
-        Buffer::BufferFragmentImpl(slices[i].begin(), slices[i].size(), releaser);
+
+  for (auto& slice : slices) {
+    buffer->addBufferFragment(*new GrpcSliceBufferFragmentImpl(std::move(slice)));
   }
-  for (size_t i = 0; i < slices.size(); i++) {
-    buffer->addBufferFragment(container->fragments_[i]);
-  }
-  container->slices_ = std::move(slices);
   return buffer;
+}
+
+std::shared_ptr<grpc::Channel>
+GoogleGrpcUtils::createChannel(const envoy::config::core::v3::GrpcService& config, Api::Api& api) {
+  std::shared_ptr<grpc::ChannelCredentials> creds = getGoogleGrpcChannelCredentials(config, api);
+  return CreateChannel(config.google_grpc().target_uri(), creds);
 }
 
 } // namespace Grpc

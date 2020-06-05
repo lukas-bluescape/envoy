@@ -31,6 +31,14 @@ public:
 
   // Redis cluster (cluster that reads host information using the redis cluster protocol).
   const std::string Redis = "envoy.clusters.redis";
+
+  // Dynamic forward proxy cluster. This cluster is designed to work directly with the
+  // dynamic forward proxy HTTP filter.
+  const std::string DynamicForwardProxy = "envoy.clusters.dynamic_forward_proxy";
+
+  // Aggregate cluster which may contain different types of clusters. It allows load balance between
+  // different type of clusters.
+  const std::string Aggregate = "envoy.clusters.aggregate";
 };
 
 using ClusterTypes = ConstSingleton<ClusterTypeValues>;

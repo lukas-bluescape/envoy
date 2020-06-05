@@ -7,12 +7,12 @@ load(
     "envoy_linkstatic",
 )
 load("@com_google_protobuf//:protobuf.bzl", "cc_proto_library", "py_proto_library")
-load("@envoy_api//bazel:api_build_system.bzl", "api_proto_library")
+load("@envoy_api//bazel:api_build_system.bzl", "api_cc_py_proto_library")
 
 # As above, but wrapped in list form for adding to dep lists. This smell seems needed as
 # SelectorValue values have to match the attribute type. See
 # https://github.com/bazelbuild/bazel/issues/2273.
-def _tcmalloc_external_deps(repository):
+def tcmalloc_external_deps(repository):
     return select({
         repository + "//bazel:disable_tcmalloc": [],
         "//conditions:default": [envoy_external_dep_path("gperftools")],
@@ -22,8 +22,59 @@ def _tcmalloc_external_deps(repository):
 # passed to cc_library should be specified with this function. Note: this exists to ensure that
 # all envoy targets pass through an envoy-declared skylark function where they can be modified
 # before being passed to a native bazel function.
-def envoy_basic_cc_library(name, **kargs):
-    native.cc_library(name = name, **kargs)
+def envoy_basic_cc_library(name, deps = [], external_deps = [], **kargs):
+    native.cc_library(
+        name = name,
+        deps = deps + [envoy_external_dep_path(dep) for dep in external_deps],
+        **kargs
+    )
+
+# All Envoy extensions must be tagged with their security hardening stance with
+# respect to downstream and upstream data plane threats. These are verbose
+# labels intended to make clear the trust that operators may place in
+# extensions.
+EXTENSION_SECURITY_POSTURES = [
+    # This extension is hardened against untrusted downstream traffic. It
+    # assumes that the upstream is trusted.
+    "robust_to_untrusted_downstream",
+    # This extension is hardened against both untrusted downstream and upstream
+    # traffic.
+    "robust_to_untrusted_downstream_and_upstream",
+    # This extension is not hardened and should only be used in deployments
+    # where both the downstream and upstream are trusted.
+    "requires_trusted_downstream_and_upstream",
+    # This is functionally equivalent to
+    # requires_trusted_downstream_and_upstream, but acts as a placeholder to
+    # allow us to identify extensions that need classifying.
+    "unknown",
+    # Not relevant to data plane threats, e.g. stats sinks.
+    "data_plane_agnostic",
+]
+
+EXTENSION_STATUS_VALUES = [
+    # This extension is stable and is expected to be production usable.
+    "stable",
+    # This extension is functional but has not had substantial production burn
+    # time, use only with this caveat.
+    "alpha",
+    # This extension is work-in-progress. Functionality is incomplete and it is
+    # not intended for production use.
+    "wip",
+]
+
+def envoy_cc_extension(
+        name,
+        security_posture,
+        # Only set this for internal, undocumented extensions.
+        undocumented = False,
+        status = "stable",
+        tags = [],
+        **kwargs):
+    if security_posture not in EXTENSION_SECURITY_POSTURES:
+        fail("Unknown extension security posture: " + security_posture)
+    if status not in EXTENSION_STATUS_VALUES:
+        fail("Unknown extension status: " + status)
+    envoy_cc_library(name, tags = tags, **kwargs)
 
 # Envoy C++ library targets should be specified with this function.
 def envoy_cc_library(
@@ -38,9 +89,18 @@ def envoy_cc_library(
         linkstamp = None,
         tags = [],
         deps = [],
-        strip_include_prefix = None):
+        strip_include_prefix = None,
+        textual_hdrs = None):
     if tcmalloc_dep:
-        deps += _tcmalloc_external_deps(repository)
+        deps += tcmalloc_external_deps(repository)
+
+    # Intended for compilation database generation. This generates an empty cc
+    # source file so Bazel generates virtual includes and recognize them as C++.
+    # Workaround for https://github.com/bazelbuild/bazel/issues/10845.
+    srcs += select({
+        "@envoy//bazel:compdb_build": ["@envoy//bazel/external:empty.cc"],
+        "//conditions:default": [],
+    })
 
     native.cc_library(
         name = name,
@@ -49,6 +109,7 @@ def envoy_cc_library(
         copts = envoy_copts(repository) + copts,
         visibility = visibility,
         tags = tags,
+        textual_hdrs = textual_hdrs,
         deps = deps + [envoy_external_dep_path(dep) for dep in external_deps] + [
             repository + "//include/envoy/common:base_includes",
             repository + "//source/common/common:fmt_lib",
@@ -65,6 +126,18 @@ def envoy_cc_library(
             repository + "//bazel:windows_x86_64": None,
             "//conditions:default": linkstamp,
         }),
+        strip_include_prefix = strip_include_prefix,
+    )
+
+    # Intended for usage by external consumers. This allows them to disambiguate
+    # include paths via `external/envoy...`
+    native.cc_library(
+        name = name + "_with_external_headers",
+        hdrs = hdrs,
+        copts = envoy_copts(repository) + copts,
+        visibility = visibility,
+        tags = ["nocompdb"],
+        deps = [":" + name],
         strip_include_prefix = strip_include_prefix,
     )
 
@@ -108,15 +181,8 @@ def envoy_include_prefix(path):
 
 # Envoy proto targets should be specified with this function.
 def envoy_proto_library(name, external_deps = [], **kwargs):
-    external_proto_deps = []
-    external_cc_proto_deps = []
-    if "api_httpbody_protos" in external_deps:
-        external_cc_proto_deps.append("@googleapis//:api_httpbody_protos")
-        external_proto_deps.append("@googleapis//:api_httpbody_protos_proto")
-    api_proto_library(
+    api_cc_py_proto_library(
         name,
-        external_cc_proto_deps = external_cc_proto_deps,
-        external_proto_deps = external_proto_deps,
         # Avoid generating .so, we don't need it, can interfere with builds
         # such as OSS-Fuzz.
         linkstatic = 1,

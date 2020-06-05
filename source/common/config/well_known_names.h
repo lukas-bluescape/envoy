@@ -13,37 +13,6 @@ namespace Envoy {
 namespace Config {
 
 /**
- * Converts certain names from v1 to v2 by adding a prefix.
- */
-class V1Converter {
-public:
-  /**
-   * @param v2_names vector of all the v2 names that may be converted.
-   */
-  V1Converter(const std::vector<std::string>& v2_names) {
-    const std::string prefix = "envoy.";
-    for (const auto& name : v2_names) {
-      // Ensure there are no misplaced names provided to this constructor.
-      ASSERT(name.find(prefix) == 0);
-      v1_to_v2_names_[name.substr(prefix.size())] = name;
-    }
-  }
-
-  /**
-   * Returns the v2 name for the provided v1 name. If it doesn't match one of the explicitly
-   * provided names, it will return the same name.
-   * @param v1_name the name to convert.
-   */
-  const std::string getV2Name(const std::string& v1_name) const {
-    auto it = v1_to_v2_names_.find(v1_name);
-    return (it == v1_to_v2_names_.end()) ? v1_name : it->second;
-  }
-
-private:
-  std::unordered_map<std::string, std::string> v1_to_v2_names_;
-};
-
-/**
  * Well-known address resolver names.
  */
 class AddressResolverNameValues {
@@ -52,7 +21,7 @@ public:
   const std::string IP = "envoy.ip";
 };
 
-typedef ConstSingleton<AddressResolverNameValues> AddressResolverNames;
+using AddressResolverNames = ConstSingleton<AddressResolverNameValues>;
 
 /**
  * Well-known metadata filter namespaces.
@@ -61,9 +30,11 @@ class MetadataFilterValues {
 public:
   // Filter namespace for built-in load balancer.
   const std::string ENVOY_LB = "envoy.lb";
+  // Filter namespace for built-in transport socket match in cluster.
+  const std::string ENVOY_TRANSPORT_SOCKET_MATCH = "envoy.transport_socket_match";
 };
 
-typedef ConstSingleton<MetadataFilterValues> MetadataFilters;
+using MetadataFilters = ConstSingleton<MetadataFilterValues>;
 
 /**
  * Keys for MetadataFilterValues::ENVOY_LB metadata.
@@ -74,7 +45,7 @@ public:
   const std::string CANARY = "canary";
 };
 
-typedef ConstSingleton<MetadataEnvoyLbKeyValues> MetadataEnvoyLbKeys;
+using MetadataEnvoyLbKeys = ConstSingleton<MetadataEnvoyLbKeyValues>;
 
 /**
  * Well known tags values and a mapping from these names to the regexes they
@@ -163,7 +134,7 @@ private:
   std::vector<Descriptor> descriptor_vec_;
 };
 
-typedef ConstSingleton<TagNameValues> TagNames;
+using TagNames = ConstSingleton<TagNameValues>;
 
 } // namespace Config
 } // namespace Envoy

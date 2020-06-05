@@ -2,16 +2,16 @@
 
 #include <chrono>
 
-#include "envoy/event/timer.h"
+#include "envoy/event/dispatcher.h"
 
-#include "quiche/quic/platform/api/quic_clock.h"
+#include "quiche/quic/core/quic_clock.h"
 
 namespace Envoy {
 namespace Quic {
 
 class EnvoyQuicClock : public quic::QuicClock {
 public:
-  EnvoyQuicClock(Event::TimeSystem& time_system) : time_system_(time_system) {}
+  EnvoyQuicClock(Event::Dispatcher& dispatcher) : dispatcher_(dispatcher) {}
 
   // quic::QuicClock
   quic::QuicTime ApproximateNow() const override;
@@ -23,7 +23,7 @@ private:
     return std::chrono::duration_cast<std::chrono::microseconds>(time.time_since_epoch()).count();
   }
 
-  Event::TimeSystem& time_system_;
+  Event::Dispatcher& dispatcher_;
 };
 
 } // namespace Quic

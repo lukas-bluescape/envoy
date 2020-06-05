@@ -4,6 +4,7 @@
 #include <tuple>
 #include <vector>
 
+#include "envoy/config/cluster/v3/cluster.pb.h"
 #include "envoy/stats/scope.h"
 
 #include "common/network/address_impl.h"
@@ -29,15 +30,12 @@
 #include "gtest/gtest.h"
 
 using testing::_;
-using testing::Invoke;
 using testing::NiceMock;
 using testing::Return;
-using testing::ReturnRef;
 using testing::SaveArg;
 
 namespace Envoy {
 namespace Upstream {
-namespace OriginalDstClusterTest {
 namespace {
 
 class TestLoadBalancerContext : public LoadBalancerContextBase {
@@ -46,17 +44,20 @@ public:
   TestLoadBalancerContext(const Network::Connection* connection, const std::string& key,
                           const std::string& value)
       : connection_(connection) {
-    downstream_headers_ = Http::HeaderMapPtr{new Http::TestHeaderMapImpl{{key, value}}};
+    downstream_headers_ =
+        Http::RequestHeaderMapPtr{new Http::TestRequestHeaderMapImpl{{key, value}}};
   }
 
   // Upstream::LoadBalancerContext
   absl::optional<uint64_t> computeHashKey() override { return 0; }
   const Network::Connection* downstreamConnection() const override { return connection_; }
-  const Http::HeaderMap* downstreamHeaders() const override { return downstream_headers_.get(); }
+  const Http::RequestHeaderMap* downstreamHeaders() const override {
+    return downstream_headers_.get();
+  }
 
   absl::optional<uint64_t> hash_key_;
   const Network::Connection* connection_;
-  Http::HeaderMapPtr downstream_headers_;
+  Http::RequestHeaderMapPtr downstream_headers_;
 };
 
 class OriginalDstClusterTest : public testing::Test {
@@ -70,7 +71,7 @@ public:
 
   void setupFromYaml(const std::string& yaml) { setup(parseClusterFromV2Yaml(yaml)); }
 
-  void setup(const envoy::api::v2::Cluster& cluster_config) {
+  void setup(const envoy::config::cluster::v3::Cluster& cluster_config) {
     NiceMock<MockClusterManager> cm;
     Envoy::Stats::ScopePtr scope = stats_store_.createScope(fmt::format(
         "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
@@ -78,8 +79,8 @@ public:
     Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
         admin_, ssl_context_manager_, *scope, cm, local_info_, dispatcher_, random_, stats_store_,
         singleton_manager_, tls_, validation_visitor_, *api_);
-    cluster_.reset(
-        new OriginalDstCluster(cluster_config, runtime_, factory_context, std::move(scope), false));
+    cluster_ = std::make_shared<OriginalDstCluster>(cluster_config, runtime_, factory_context,
+                                                    std::move(scope), false);
     cluster_->prioritySet().addPriorityUpdateCb(
         [&](uint32_t, const HostVector&, const HostVector&) -> void {
           membership_updated_.ready();
@@ -89,7 +90,7 @@ public:
 
   Stats::IsolatedStoreImpl stats_store_;
   Ssl::MockContextManager ssl_context_manager_;
-  ClusterSharedPtr cluster_;
+  OriginalDstClusterSharedPtr cluster_;
   ReadyWatcher membership_updated_;
   ReadyWatcher initialized_;
   NiceMock<Runtime::MockLoader> runtime_;
@@ -98,39 +99,22 @@ public:
   NiceMock<Runtime::MockRandomGenerator> random_;
   NiceMock<LocalInfo::MockLocalInfo> local_info_;
   NiceMock<Server::MockAdmin> admin_;
-  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest().currentThreadId()};
+  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest()};
   NiceMock<ThreadLocal::MockInstance> tls_;
   NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor_;
   Api::ApiPtr api_;
 };
 
-TEST(OriginalDstClusterConfigTest, BadConfig) {
-  std::string json = R"EOF(
-  {
-    "name": "name",
-    "connect_timeout_ms": 250,
-    "type": "original_dst",
-    "lb_type": "original_dst_lb",
-    "hosts": [{"url": "tcp://foo.bar.com:443"}]
-  }
-  )EOF"; // Help Emacs balance quotation marks: "
-
-  EXPECT_THROW_WITH_MESSAGE(parseClusterFromJson(json), EnvoyException,
-                            "original_dst clusters must have no hosts configured");
-}
-
 TEST(OriginalDstClusterConfigTest, GoodConfig) {
-  std::string json = R"EOF(
-  {
-    "name": "name",
-    "connect_timeout_ms": 250,
-    "type": "original_dst",
-    "lb_type": "original_dst_lb",
-    "cleanup_interval_ms": 1000
-  }
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: original_dst
+    lb_policy: cluster_provided
+    cleanup_interval: 1s
   )EOF"; // Help Emacs balance quotation marks: "
 
-  EXPECT_TRUE(parseClusterFromJson(json).has_cleanup_interval());
+  EXPECT_TRUE(parseClusterFromV2Yaml(yaml).has_cleanup_interval());
 }
 
 TEST_F(OriginalDstClusterTest, BadConfigWithLoadAssignment) {
@@ -185,7 +169,7 @@ TEST_F(OriginalDstClusterTest, CleanupInterval) {
 
   EXPECT_CALL(initialized_, ready());
   EXPECT_CALL(membership_updated_, ready()).Times(0);
-  EXPECT_CALL(*cleanup_timer_, enableTimer(std::chrono::milliseconds(1000)));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(std::chrono::milliseconds(1000), _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -202,7 +186,7 @@ TEST_F(OriginalDstClusterTest, NoContext) {
 
   EXPECT_CALL(initialized_, ready());
   EXPECT_CALL(membership_updated_, ready()).Times(0);
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -215,8 +199,7 @@ TEST_F(OriginalDstClusterTest, NoContext) {
   // No downstream connection => no host.
   {
     TestLoadBalancerContext lb_context(nullptr);
-    OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                        cluster_->info()->lbOriginalDstConfig());
+    OriginalDstCluster::LoadBalancer lb(cluster_);
     EXPECT_CALL(dispatcher_, post(_)).Times(0);
     HostConstSharedPtr host = lb.chooseHost(&lb_context);
     EXPECT_EQ(host, nullptr);
@@ -231,8 +214,7 @@ TEST_F(OriginalDstClusterTest, NoContext) {
     // First argument is normally the reference to the ThreadLocalCluster's HostSet, but in these
     // tests we do not have the thread local clusters, so we pass a reference to the HostSet of the
     // primary cluster. The implementation handles both cases the same.
-    OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                        cluster_->info()->lbOriginalDstConfig());
+    OriginalDstCluster::LoadBalancer lb(cluster_);
     EXPECT_CALL(dispatcher_, post(_)).Times(0);
     HostConstSharedPtr host = lb.chooseHost(&lb_context);
     EXPECT_EQ(host, nullptr);
@@ -245,8 +227,7 @@ TEST_F(OriginalDstClusterTest, NoContext) {
     connection.local_address_ = std::make_shared<Network::Address::PipeInstance>("unix://foo");
     EXPECT_CALL(connection, localAddressRestored()).WillRepeatedly(Return(true));
 
-    OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                        cluster_->info()->lbOriginalDstConfig());
+    OriginalDstCluster::LoadBalancer lb(cluster_);
     EXPECT_CALL(dispatcher_, post(_)).Times(0);
     HostConstSharedPtr host = lb.chooseHost(&lb_context);
     EXPECT_EQ(host, nullptr);
@@ -262,7 +243,7 @@ TEST_F(OriginalDstClusterTest, Membership) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -281,11 +262,10 @@ TEST_F(OriginalDstClusterTest, Membership) {
   connection.local_address_ = std::make_shared<Network::Address::Ipv4Instance>("10.10.11.11");
   EXPECT_CALL(connection, localAddressRestored()).WillRepeatedly(Return(true));
 
-  OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                      cluster_->info()->lbOriginalDstConfig());
   Event::PostCb post_cb;
   EXPECT_CALL(dispatcher_, post(_)).WillOnce(SaveArg<0>(&post_cb));
-  HostConstSharedPtr host = lb.chooseHost(&lb_context);
+  // Mock the cluster manager by recreating the load balancer each time to get a fresh host map
+  HostConstSharedPtr host = OriginalDstCluster::LoadBalancer(cluster_).chooseHost(&lb_context);
   post_cb();
   auto cluster_hosts = cluster_->prioritySet().hostSetsPerPriority()[0]->hosts();
 
@@ -304,14 +284,15 @@ TEST_F(OriginalDstClusterTest, Membership) {
             *cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]->address());
 
   // Same host is returned on the 2nd call
-  HostConstSharedPtr host2 = lb.chooseHost(&lb_context);
+  // Mock the cluster manager by recreating the load balancer with the new host map
+  HostConstSharedPtr host2 = OriginalDstCluster::LoadBalancer(cluster_).chooseHost(&lb_context);
   EXPECT_EQ(host2, host);
 
   // Make host time out, no membership changes happen on the first timeout.
   ASSERT_EQ(1UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
   EXPECT_EQ(true, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]->used());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
-  cleanup_timer_->callback_();
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
+  cleanup_timer_->invokeCallback();
   EXPECT_EQ(
       cluster_hosts,
       cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()); // hosts vector remains the same
@@ -320,9 +301,9 @@ TEST_F(OriginalDstClusterTest, Membership) {
   ASSERT_EQ(1UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
   EXPECT_EQ(false, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]->used());
 
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   EXPECT_CALL(membership_updated_, ready());
-  cleanup_timer_->callback_();
+  cleanup_timer_->invokeCallback();
   EXPECT_NE(cluster_hosts,
             cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()); // hosts vector changes
 
@@ -332,7 +313,8 @@ TEST_F(OriginalDstClusterTest, Membership) {
   // New host gets created
   EXPECT_CALL(membership_updated_, ready());
   EXPECT_CALL(dispatcher_, post(_)).WillOnce(SaveArg<0>(&post_cb));
-  HostConstSharedPtr host3 = lb.chooseHost(&lb_context);
+  // Mock the cluster manager by recreating the load balancer with the new host map
+  HostConstSharedPtr host3 = OriginalDstCluster::LoadBalancer(cluster_).chooseHost(&lb_context);
   post_cb();
   EXPECT_NE(host3, nullptr);
   EXPECT_NE(host3, host);
@@ -352,7 +334,7 @@ TEST_F(OriginalDstClusterTest, Membership2) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -374,9 +356,7 @@ TEST_F(OriginalDstClusterTest, Membership2) {
   connection2.local_address_ = std::make_shared<Network::Address::Ipv4Instance>("10.10.11.12");
   EXPECT_CALL(connection2, localAddressRestored()).WillRepeatedly(Return(true));
 
-  OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                      cluster_->info()->lbOriginalDstConfig());
-
+  OriginalDstCluster::LoadBalancer lb(cluster_);
   EXPECT_CALL(membership_updated_, ready());
   Event::PostCb post_cb;
   EXPECT_CALL(dispatcher_, post(_)).WillOnce(SaveArg<0>(&post_cb));
@@ -413,8 +393,8 @@ TEST_F(OriginalDstClusterTest, Membership2) {
   ASSERT_EQ(2UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
   EXPECT_EQ(true, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]->used());
   EXPECT_EQ(true, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[1]->used());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
-  cleanup_timer_->callback_();
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
+  cleanup_timer_->invokeCallback();
   EXPECT_EQ(
       cluster_hosts,
       cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()); // hosts vector remains the same
@@ -424,9 +404,9 @@ TEST_F(OriginalDstClusterTest, Membership2) {
   EXPECT_EQ(false, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]->used());
   EXPECT_EQ(false, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[1]->used());
 
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   EXPECT_CALL(membership_updated_, ready());
-  cleanup_timer_->callback_();
+  cleanup_timer_->invokeCallback();
   EXPECT_NE(cluster_hosts,
             cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()); // hosts vector changes
 
@@ -442,7 +422,7 @@ TEST_F(OriginalDstClusterTest, Connection) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -460,8 +440,7 @@ TEST_F(OriginalDstClusterTest, Connection) {
   connection.local_address_ = std::make_shared<Network::Address::Ipv6Instance>("FD00::1");
   EXPECT_CALL(connection, localAddressRestored()).WillRepeatedly(Return(true));
 
-  OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                      cluster_->info()->lbOriginalDstConfig());
+  OriginalDstCluster::LoadBalancer lb(cluster_);
   Event::PostCb post_cb;
   EXPECT_CALL(dispatcher_, post(_)).WillOnce(SaveArg<0>(&post_cb));
   HostConstSharedPtr host = lb.chooseHost(&lb_context);
@@ -483,7 +462,7 @@ TEST_F(OriginalDstClusterTest, MultipleClusters) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   PrioritySetImpl second;
@@ -510,18 +489,16 @@ TEST_F(OriginalDstClusterTest, MultipleClusters) {
   connection.local_address_ = std::make_shared<Network::Address::Ipv6Instance>("FD00::1");
   EXPECT_CALL(connection, localAddressRestored()).WillRepeatedly(Return(true));
 
-  OriginalDstCluster::LoadBalancer lb1(cluster_->prioritySet(), cluster_,
-                                       cluster_->info()->lbOriginalDstConfig());
-  OriginalDstCluster::LoadBalancer lb2(second, cluster_, cluster_->info()->lbOriginalDstConfig());
+  OriginalDstCluster::LoadBalancer lb(cluster_);
   Event::PostCb post_cb;
   EXPECT_CALL(dispatcher_, post(_)).WillOnce(SaveArg<0>(&post_cb));
-  HostConstSharedPtr host = lb1.chooseHost(&lb_context);
+  HostConstSharedPtr host = lb.chooseHost(&lb_context);
   post_cb();
   ASSERT_NE(host, nullptr);
   EXPECT_EQ(*connection.local_address_, *host->address());
 
   EXPECT_EQ(1UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
-  // Check that lb2 also gets updated
+  // Check that 'second' also gets updated
   EXPECT_EQ(1UL, second.hostSetsPerPriority()[0]->hosts().size());
 
   EXPECT_EQ(host, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts()[0]);
@@ -539,7 +516,7 @@ TEST_F(OriginalDstClusterTest, UseHttpHeaderEnabled) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -549,8 +526,7 @@ TEST_F(OriginalDstClusterTest, UseHttpHeaderEnabled) {
       0UL,
       cluster_->prioritySet().hostSetsPerPriority()[0]->healthyHostsPerLocality().get().size());
 
-  OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                      cluster_->info()->lbOriginalDstConfig());
+  OriginalDstCluster::LoadBalancer lb(cluster_);
   Event::PostCb post_cb;
 
   // HTTP header override.
@@ -611,7 +587,7 @@ TEST_F(OriginalDstClusterTest, UseHttpHeaderDisabled) {
   )EOF";
 
   EXPECT_CALL(initialized_, ready());
-  EXPECT_CALL(*cleanup_timer_, enableTimer(_));
+  EXPECT_CALL(*cleanup_timer_, enableTimer(_, _));
   setupFromYaml(yaml);
 
   EXPECT_EQ(0UL, cluster_->prioritySet().hostSetsPerPriority()[0]->hosts().size());
@@ -621,8 +597,7 @@ TEST_F(OriginalDstClusterTest, UseHttpHeaderDisabled) {
       0UL,
       cluster_->prioritySet().hostSetsPerPriority()[0]->healthyHostsPerLocality().get().size());
 
-  OriginalDstCluster::LoadBalancer lb(cluster_->prioritySet(), cluster_,
-                                      cluster_->info()->lbOriginalDstConfig());
+  OriginalDstCluster::LoadBalancer lb(cluster_);
   Event::PostCb post_cb;
 
   // Downstream connection with original_dst filter, HTTP header override ignored.
@@ -664,6 +639,5 @@ TEST_F(OriginalDstClusterTest, UseHttpHeaderDisabled) {
 }
 
 } // namespace
-} // namespace OriginalDstClusterTest
 } // namespace Upstream
 } // namespace Envoy

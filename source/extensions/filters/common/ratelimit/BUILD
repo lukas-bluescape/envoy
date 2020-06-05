@@ -4,7 +4,6 @@ load(
     "//bazel:envoy_build_system.bzl",
     "envoy_cc_library",
     "envoy_package",
-    "envoy_proto_library",
 )
 
 envoy_package()
@@ -25,12 +24,12 @@ envoy_cc_library(
         "//source/common/grpc:typed_async_client_lib",
         "//source/common/http:headers_lib",
         "//source/common/tracing:http_tracer_lib",
-        "@envoy_api//envoy/api/v2/ratelimit:ratelimit_cc",
-        "@envoy_api//envoy/config/ratelimit/v2:rls_cc",
-        "@envoy_api//envoy/service/ratelimit/v2:rls_cc",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/common/ratelimit/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/ratelimit/v3:pkg_cc_proto",
 
         # Support to legacy rate-limit service
-        "@envoy_api//envoy/service/ratelimit/v1:rls_cc",
+        "@envoy_api//envoy/service/ratelimit/v1:pkg_cc_proto",
     ],
 )
 
@@ -42,6 +41,14 @@ envoy_cc_library(
         "//include/envoy/ratelimit:ratelimit_interface",
         "//include/envoy/singleton:manager_interface",
         "//include/envoy/tracing:http_tracer_interface",
-        "@envoy_api//envoy/config/ratelimit/v2:rls_cc",
+        "//source/common/stats:symbol_table_lib",
+    ],
+)
+
+envoy_cc_library(
+    name = "stat_names_lib",
+    hdrs = ["stat_names.h"],
+    deps = [
+        "//source/common/stats:symbol_table_lib",
     ],
 )

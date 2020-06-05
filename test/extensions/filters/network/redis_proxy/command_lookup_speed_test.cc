@@ -24,7 +24,7 @@ namespace RedisProxy {
 class NoOpSplitCallbacks : public CommandSplitter::SplitCallbacks {
 public:
   NoOpSplitCallbacks() = default;
-  ~NoOpSplitCallbacks() = default;
+  ~NoOpSplitCallbacks() override = default;
 
   bool connectionAllowed() override { return true; }
   void onAuth(const std::string&) override {}
@@ -85,13 +85,3 @@ static void BM_MakeRequests(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_MakeRequests);
-
-// Boilerplate main(), which discovers benchmarks in the same file and runs them.
-int main(int argc, char** argv) {
-  benchmark::Initialize(&argc, argv);
-
-  if (benchmark::ReportUnrecognizedArguments(argc, argv)) {
-    return 1;
-  }
-  benchmark::RunSpecifiedBenchmarks();
-}

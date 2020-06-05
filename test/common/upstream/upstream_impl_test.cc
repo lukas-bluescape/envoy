@@ -6,13 +6,15 @@
 #include <vector>
 
 #include "envoy/api/api.h"
+#include "envoy/config/cluster/v3/cluster.pb.h"
+#include "envoy/config/core/v3/base.pb.h"
+#include "envoy/config/core/v3/health_check.pb.h"
+#include "envoy/config/endpoint/v3/endpoint_components.pb.h"
 #include "envoy/http/codec.h"
 #include "envoy/stats/scope.h"
 #include "envoy/upstream/cluster_manager.h"
 
 #include "common/config/metadata.h"
-#include "common/json/config_schemas.h"
-#include "common/json/json_loader.h"
 #include "common/network/utility.h"
 #include "common/singleton/manager_impl.h"
 #include "common/upstream/static_cluster.h"
@@ -20,6 +22,7 @@
 
 #include "server/transport_socket_config_impl.h"
 
+#include "test/common/stats/stat_test_utility.h"
 #include "test/common/upstream/utility.h"
 #include "test/mocks/common.h"
 #include "test/mocks/local_info/mocks.h"
@@ -40,7 +43,6 @@ using testing::ContainerEq;
 using testing::Invoke;
 using testing::NiceMock;
 using testing::Return;
-using testing::ReturnRef;
 
 namespace Envoy {
 namespace Upstream {
@@ -57,8 +59,8 @@ protected:
   NiceMock<Event::MockDispatcher> dispatcher_;
   NiceMock<Runtime::MockLoader> runtime_;
   NiceMock<Runtime::MockRandomGenerator> random_;
-  Stats::IsolatedStoreImpl stats_;
-  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest().currentThreadId()};
+  Stats::TestUtil::TestStore stats_;
+  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest()};
   NiceMock<ThreadLocal::MockInstance> tls_;
   NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor_;
   Api::ApiPtr api_;
@@ -108,33 +110,36 @@ struct ResolverData {
   Network::MockActiveDnsQuery active_dns_query_;
 };
 
-typedef std::tuple<std::string, Network::DnsLookupFamily, std::list<std::string>>
-    StrictDnsConfigTuple;
+using StrictDnsConfigTuple =
+    std::tuple<std::string, Network::DnsLookupFamily, std::list<std::string>>;
 std::vector<StrictDnsConfigTuple> generateStrictDnsParams() {
   std::vector<StrictDnsConfigTuple> dns_config;
   {
-    std::string family_json("");
-    Network::DnsLookupFamily family(Network::DnsLookupFamily::V4Only);
-    std::list<std::string> dns_response{"127.0.0.1", "127.0.0.2"};
-    dns_config.push_back(std::make_tuple(family_json, family, dns_response));
-  }
-  {
-    std::string family_json(R"EOF("dns_lookup_family": "v4_only",)EOF");
-    Network::DnsLookupFamily family(Network::DnsLookupFamily::V4Only);
-    std::list<std::string> dns_response{"127.0.0.1", "127.0.0.2"};
-    dns_config.push_back(std::make_tuple(family_json, family, dns_response));
-  }
-  {
-    std::string family_json(R"EOF("dns_lookup_family": "v6_only",)EOF");
-    Network::DnsLookupFamily family(Network::DnsLookupFamily::V6Only);
-    std::list<std::string> dns_response{"::1", "::2"};
-    dns_config.push_back(std::make_tuple(family_json, family, dns_response));
-  }
-  {
-    std::string family_json(R"EOF("dns_lookup_family": "auto",)EOF");
+    std::string family_yaml("");
     Network::DnsLookupFamily family(Network::DnsLookupFamily::Auto);
     std::list<std::string> dns_response{"127.0.0.1", "127.0.0.2"};
-    dns_config.push_back(std::make_tuple(family_json, family, dns_response));
+    dns_config.push_back(std::make_tuple(family_yaml, family, dns_response));
+  }
+  {
+    std::string family_yaml(R"EOF(dns_lookup_family: v4_only
+                            )EOF");
+    Network::DnsLookupFamily family(Network::DnsLookupFamily::V4Only);
+    std::list<std::string> dns_response{"127.0.0.1", "127.0.0.2"};
+    dns_config.push_back(std::make_tuple(family_yaml, family, dns_response));
+  }
+  {
+    std::string family_yaml(R"EOF(dns_lookup_family: v6_only
+                            )EOF");
+    Network::DnsLookupFamily family(Network::DnsLookupFamily::V6Only);
+    std::list<std::string> dns_response{"::1", "::2"};
+    dns_config.push_back(std::make_tuple(family_yaml, family, dns_response));
+  }
+  {
+    std::string family_yaml(R"EOF(dns_lookup_family: auto
+                            )EOF");
+    Network::DnsLookupFamily family(Network::DnsLookupFamily::Auto);
+    std::list<std::string> dns_response{"127.0.0.1", "127.0.0.2"};
+    dns_config.push_back(std::make_tuple(family_yaml, family, dns_response));
   }
   return dns_config;
 }
@@ -148,25 +153,27 @@ INSTANTIATE_TEST_SUITE_P(DnsParam, StrictDnsParamTest,
 TEST_P(StrictDnsParamTest, ImmediateResolve) {
   auto dns_resolver = std::make_shared<NiceMock<Network::MockDnsResolver>>();
   ReadyWatcher initialized;
-  const std::string json = R"EOF(
-  {
-    "name": "name",
-    "connect_timeout_ms": 250,
-    "type": "strict_dns",
-  )EOF" + std::get<0>(GetParam()) +
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: strict_dns
+    )EOF" + std::get<0>(GetParam()) +
                            R"EOF(
-    "lb_type": "round_robin",
-    "hosts": [{"url": "tcp://foo.bar.com:443"}]
-  }
+    lb_policy: round_robin
+    hosts:
+    - socket_address:
+        address: foo.bar.com
+        port_value: 443
   )EOF";
   EXPECT_CALL(initialized, ready());
   EXPECT_CALL(*dns_resolver, resolve("foo.bar.com", std::get<1>(GetParam()), _))
       .WillOnce(Invoke([&](const std::string&, Network::DnsLookupFamily,
                            Network::DnsResolver::ResolveCb cb) -> Network::ActiveDnsQuery* {
-        cb(TestUtility::makeDnsResponse(std::get<2>(GetParam())));
+        cb(Network::DnsResolver::ResolutionStatus::Success,
+           TestUtility::makeDnsResponse(std::get<2>(GetParam())));
         return nullptr;
       }));
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -200,7 +207,7 @@ TEST_F(StrictDnsClusterImplTest, ZeroHostsHealthChecker) {
   )EOF";
 
   ResolverData resolver(*dns_resolver_, dispatcher_);
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -217,8 +224,8 @@ TEST_F(StrictDnsClusterImplTest, ZeroHostsHealthChecker) {
 
   EXPECT_CALL(*health_checker, addHostCheckCompleteCb(_));
   EXPECT_CALL(initialized, ready());
-  EXPECT_CALL(*resolver.timer_, enableTimer(_));
-  resolver.dns_callback_({});
+  EXPECT_CALL(*resolver.timer_, enableTimer(_, _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success, {});
   EXPECT_EQ(0UL, cluster.prioritySet().hostSetsPerPriority()[0]->hosts().size());
   EXPECT_EQ(0UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
 }
@@ -228,38 +235,40 @@ TEST_F(StrictDnsClusterImplTest, Basic) {
   ResolverData resolver2(*dns_resolver_, dispatcher_);
   ResolverData resolver1(*dns_resolver_, dispatcher_);
 
-  const std::string json = R"EOF(
-  {
-    "name": "name",
-    "connect_timeout_ms": 250,
-    "type": "strict_dns",
-    "dns_refresh_rate_ms": 4000,
-    "lb_type": "round_robin",
-    "circuit_breakers": {
-      "default": {
-        "max_connections": 43,
-        "max_pending_requests": 57,
-        "max_requests": 50,
-        "max_retries": 10
-      },
-      "high": {
-        "max_connections": 1,
-        "max_pending_requests": 2,
-        "max_requests": 3,
-        "max_retries": 4
-      }
-    },
-    "max_requests_per_connection": 3,
-    "http2_settings": {
-       "hpack_table_size": 0
-     },
-    "hosts": [{"url": "tcp://localhost1:11001"},
-              {"url": "tcp://localhost2:11002"}]
-
-  }
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: strict_dns
+    dns_refresh_rate: 4s
+    dns_failure_refresh_rate:
+      base_interval: 7s
+      max_interval: 10s
+    lb_policy: round_robin
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 43
+        max_pending_requests: 57
+        max_requests: 50
+        max_retries: 10
+      - priority: HIGH
+        max_connections: 1
+        max_pending_requests: 2
+        max_requests: 3
+        max_retries: 4
+    max_requests_per_connection: 3
+    protocol_selection: USE_DOWNSTREAM_PROTOCOL
+    http2_protocol_options:
+      hpack_table_size: 0
+    http_protocol_options:
+      header_key_format:
+        proper_case_words: {}
+    hosts:
+    - { socket_address: { address: localhost1, port_value: 11001 }}
+    - { socket_address: { address: localhost2, port_value: 11002 }}
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -287,7 +296,9 @@ TEST_F(StrictDnsClusterImplTest, Basic) {
   EXPECT_CALL(runtime_.snapshot_, getInteger("circuit_breakers.name.high.max_retries", 4));
   EXPECT_EQ(4U, cluster.info()->resourceManager(ResourcePriority::High).retries().max());
   EXPECT_EQ(3U, cluster.info()->maxRequestsPerConnection());
-  EXPECT_EQ(0U, cluster.info()->http2Settings().hpack_table_size_);
+  EXPECT_EQ(0U, cluster.info()->http2Options().hpack_table_size().value());
+  EXPECT_EQ(Http::Http1Settings::HeaderKeyFormat::ProperCase,
+            cluster.info()->http1Settings().header_key_format_);
 
   cluster.info()->stats().upstream_rq_total_.inc();
   EXPECT_EQ(1UL, stats_.counter("cluster.name.upstream_rq_total").value());
@@ -302,9 +313,10 @@ TEST_F(StrictDnsClusterImplTest, Basic) {
   cluster.initialize([] {});
 
   resolver1.expectResolve(*dns_resolver_);
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -312,33 +324,37 @@ TEST_F(StrictDnsClusterImplTest, Basic) {
   EXPECT_EQ("localhost1", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[1]->hostname());
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.3"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.3"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
   // Make sure we de-dup the same address.
-  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver2.dns_callback_(TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001", "10.0.0.1:11002"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -352,11 +368,33 @@ TEST_F(StrictDnsClusterImplTest, Basic) {
     EXPECT_EQ(cluster.info().get(), &host->cluster());
   }
 
+  // Empty response. With successful but empty response the host list deletes the address.
+  resolver1.expectResolve(*dns_resolver_);
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  EXPECT_CALL(membership_updated, ready());
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({}));
+  EXPECT_THAT(
+      std::list<std::string>({"10.0.0.1:11002"}),
+      ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
+
+  // Empty response. With failing but empty response the host list does not delete the address.
+  ON_CALL(random_, random()).WillByDefault(Return(8000));
+  resolver2.expectResolve(*dns_resolver_);
+  resolver2.timer_->invokeCallback();
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(1000), _));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Failure,
+                          TestUtility::makeDnsResponse({}));
+  EXPECT_THAT(
+      std::list<std::string>({"10.0.0.1:11002"}),
+      ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
+
   // Make sure we cancel.
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
+  resolver1.timer_->invokeCallback();
   resolver2.expectResolve(*dns_resolver_);
-  resolver2.timer_->callback_();
+  resolver2.timer_->invokeCallback();
 
   EXPECT_CALL(resolver1.active_dns_query_, cancel());
   EXPECT_CALL(resolver2.active_dns_query_, cancel());
@@ -375,7 +413,7 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalActiveHealthSkipped) {
   )EOF";
 
   ResolverData resolver(*dns_resolver_, dispatcher_);
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -391,8 +429,9 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalActiveHealthSkipped) {
   cluster.initialize([&]() -> void {});
 
   EXPECT_CALL(*health_checker, addHostCheckCompleteCb(_));
-  EXPECT_CALL(*resolver.timer_, enableTimer(_)).Times(2);
-  resolver.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
+  EXPECT_CALL(*resolver.timer_, enableTimer(_, _)).Times(2);
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
 
   // Verify that both endpoints are initially marked with FAILED_ACTIVE_HC, then
   // clear the flag to simulate that these endpoints have been successfully health
@@ -401,15 +440,16 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalActiveHealthSkipped) {
     const auto& hosts = cluster.prioritySet().hostSetsPerPriority()[0]->hosts();
     EXPECT_EQ(2UL, hosts.size());
 
-    for (size_t i = 0; i < hosts.size(); ++i) {
-      EXPECT_TRUE(hosts[i]->healthFlagGet(Host::HealthFlag::FAILED_ACTIVE_HC));
-      hosts[i]->healthFlagClear(Host::HealthFlag::FAILED_ACTIVE_HC);
-      hosts[i]->healthFlagClear(Host::HealthFlag::PENDING_ACTIVE_HC);
+    for (const auto& host : hosts) {
+      EXPECT_TRUE(host->healthFlagGet(Host::HealthFlag::FAILED_ACTIVE_HC));
+      host->healthFlagClear(Host::HealthFlag::FAILED_ACTIVE_HC);
+      host->healthFlagClear(Host::HealthFlag::PENDING_ACTIVE_HC);
     }
   }
 
   // Re-resolve the DNS name with only one record
-  resolver.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1"}));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({"127.0.0.1"}));
 
   const auto& hosts = cluster.prioritySet().hostSetsPerPriority()[0]->hosts();
   EXPECT_EQ(1UL, hosts.size());
@@ -427,7 +467,7 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalAfterHcFail) {
   )EOF";
 
   ResolverData resolver(*dns_resolver_, dispatcher_);
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -444,8 +484,9 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalAfterHcFail) {
   cluster.initialize([&initialized]() { initialized.ready(); });
 
   EXPECT_CALL(*health_checker, addHostCheckCompleteCb(_));
-  EXPECT_CALL(*resolver.timer_, enableTimer(_)).Times(2);
-  resolver.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
+  EXPECT_CALL(*resolver.timer_, enableTimer(_, _)).Times(2);
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
 
   // Verify that both endpoints are initially marked with FAILED_ACTIVE_HC, then
   // clear the flag to simulate that these endpoints have been successfully health
@@ -466,7 +507,8 @@ TEST_F(StrictDnsClusterImplTest, HostRemovalAfterHcFail) {
   }
 
   // Re-resolve the DNS name with only one record, we should still have 2 hosts.
-  resolver.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1"}));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({"127.0.0.1"}));
 
   {
     const auto& hosts = cluster.prioritySet().hostSetsPerPriority()[0]->hosts();
@@ -499,6 +541,9 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
     dns_lookup_family: V4_ONLY
     connect_timeout: 0.25s
     dns_refresh_rate: 4s
+    dns_failure_refresh_rate:
+      base_interval: 7s
+      max_interval: 10s
 
     lb_policy: ROUND_ROBIN
 
@@ -549,7 +594,7 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
               port_value: 8000
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -578,7 +623,7 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
   EXPECT_CALL(runtime_.snapshot_, getInteger("circuit_breakers.name.high.max_retries", 4));
   EXPECT_EQ(4U, cluster.info()->resourceManager(ResourcePriority::High).retries().max());
   EXPECT_EQ(3U, cluster.info()->maxRequestsPerConnection());
-  EXPECT_EQ(0U, cluster.info()->http2Settings().hpack_table_size_);
+  EXPECT_EQ(0U, cluster.info()->http2Options().hpack_table_size().value());
 
   cluster.info()->stats().upstream_rq_total_.inc();
   EXPECT_EQ(1UL, stats_.counter("cluster.name.upstream_rq_total").value());
@@ -593,9 +638,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
   cluster.initialize([] {});
 
   resolver1.expectResolve(*dns_resolver_);
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -611,9 +657,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
   EXPECT_EQ(0UL, stats_.counter("cluster.name.update_no_rebuild").value());
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -623,9 +670,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
   EXPECT_EQ(1UL, stats_.counter("cluster.name.update_no_rebuild").value());
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -634,32 +682,36 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
   // Since no change for localhost1, we expect no rebuild.
   EXPECT_EQ(2UL, stats_.counter("cluster.name.update_no_rebuild").value());
 
-  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver2.dns_callback_(TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
 
   // We received a new set of hosts for localhost2. Should rebuild the cluster.
   EXPECT_EQ(2UL, stats_.counter("cluster.name.update_no_rebuild").value());
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
 
   // We again received the same set as before for localhost1. No rebuild this time.
   EXPECT_EQ(3UL, stats_.counter("cluster.name.update_no_rebuild").value());
 
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.3"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.3"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001", "10.0.0.1:11002"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
   // Make sure we de-dup the same address.
-  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver2.dns_callback_(TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001", "10.0.0.1:11002"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -671,9 +723,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
             cluster.prioritySet().hostSetsPerPriority()[0]->healthyHostsPerLocality().get().size());
 
   // Make sure that we *don't* de-dup between resolve targets.
-  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver3.dns_callback_(TestUtility::makeDnsResponse({"10.0.0.1"}));
+  resolver3.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"10.0.0.1"}));
 
   const auto hosts = cluster.prioritySet().hostSetsPerPriority()[0]->hosts();
   EXPECT_THAT(std::list<std::string>({"127.0.0.3:11001", "10.0.0.1:11002", "10.0.0.1:11002"}),
@@ -686,7 +739,7 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
             cluster.prioritySet().hostSetsPerPriority()[0]->healthyHostsPerLocality().get().size());
 
   // Ensure that all host objects in the host list are unique.
-  for (const auto host : hosts) {
+  for (const auto& host : hosts) {
     EXPECT_EQ(1, std::count(hosts.begin(), hosts.end(), host));
   }
 
@@ -705,24 +758,26 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasic) {
         }
       });
 
-  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver2.dns_callback_(TestUtility::makeDnsResponse({}));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({}));
 
-  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver3.dns_callback_(TestUtility::makeDnsResponse({}));
+  resolver3.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({}));
 
   // Ensure that we called the update membership callback.
   EXPECT_EQ(2, removed_hosts.size());
 
   // Make sure we cancel.
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
+  resolver1.timer_->invokeCallback();
   resolver2.expectResolve(*dns_resolver_);
-  resolver2.timer_->callback_();
+  resolver2.timer_->invokeCallback();
   resolver3.expectResolve(*dns_resolver_);
-  resolver3.timer_->callback_();
+  resolver3.timer_->invokeCallback();
 
   EXPECT_CALL(resolver1.active_dns_query_, cancel());
   EXPECT_CALL(resolver2.active_dns_query_, cancel());
@@ -774,7 +829,7 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasicMultiplePriorities) {
               port_value: 8000
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -790,9 +845,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasicMultiplePriorities) {
   cluster.initialize([] {});
 
   resolver1.expectResolve(*dns_resolver_);
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.1", "127.0.0.2"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -800,33 +856,37 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasicMultiplePriorities) {
   EXPECT_EQ("localhost1", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[1]->hostname());
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.2", "127.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.1:11001", "127.0.0.2:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
-  resolver1.timer_->callback_();
-  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  resolver1.timer_->invokeCallback();
+  EXPECT_CALL(*resolver1.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver1.dns_callback_(TestUtility::makeDnsResponse({"127.0.0.3"}));
+  resolver1.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"127.0.0.3"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
 
   // Make sure we de-dup the same address.
-  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver2.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver2.dns_callback_(TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
+  resolver2.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"10.0.0.1", "10.0.0.1"}));
   EXPECT_THAT(
       std::list<std::string>({"127.0.0.3:11001", "10.0.0.1:11002"}),
       ContainerEq(hostListToAddresses(cluster.prioritySet().hostSetsPerPriority()[0]->hosts())));
@@ -840,9 +900,10 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasicMultiplePriorities) {
     EXPECT_EQ(cluster.info().get(), &host->cluster());
   }
 
-  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000)));
+  EXPECT_CALL(*resolver3.timer_, enableTimer(std::chrono::milliseconds(4000), _));
   EXPECT_CALL(membership_updated, ready());
-  resolver3.dns_callback_(TestUtility::makeDnsResponse({"192.168.1.1", "192.168.1.2"}));
+  resolver3.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                          TestUtility::makeDnsResponse({"192.168.1.1", "192.168.1.2"}));
 
   // Make sure we have multiple priorities.
   EXPECT_THAT(
@@ -851,11 +912,11 @@ TEST_F(StrictDnsClusterImplTest, LoadAssignmentBasicMultiplePriorities) {
 
   // Make sure we cancel.
   resolver1.expectResolve(*dns_resolver_);
-  resolver1.timer_->callback_();
+  resolver1.timer_->invokeCallback();
   resolver2.expectResolve(*dns_resolver_);
-  resolver2.timer_->callback_();
+  resolver2.timer_->invokeCallback();
   resolver3.expectResolve(*dns_resolver_);
-  resolver3.timer_->callback_();
+  resolver3.timer_->invokeCallback();
 
   EXPECT_CALL(resolver1.active_dns_query_, cancel());
   EXPECT_CALL(resolver2.active_dns_query_, cancel());
@@ -873,7 +934,7 @@ TEST_F(StrictDnsClusterImplTest, CustomResolverFails) {
     hosts: [{ socket_address: { address: foo.bar.com, port_value: 443, resolver_name: customresolver }}]
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope =
       stats_.createScope(fmt::format("cluster.{}.", cluster_config.name()));
   Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
@@ -884,6 +945,148 @@ TEST_F(StrictDnsClusterImplTest, CustomResolverFails) {
       std::make_unique<StrictDnsClusterImpl>(cluster_config, runtime_, dns_resolver_,
                                              factory_context, std::move(scope), false),
       EnvoyException, "STRICT_DNS clusters must NOT have a custom resolver name set");
+}
+
+TEST_F(StrictDnsClusterImplTest, FailureRefreshRateBackoffResetsWhenSuccessHappens) {
+  ResolverData resolver(*dns_resolver_, dispatcher_);
+
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    dns_refresh_rate: 4s
+    dns_failure_refresh_rate:
+      base_interval: 7s
+      max_interval: 10s
+    hosts: [{ socket_address: { address: localhost1, port_value: 11001 }}]
+  )EOF";
+
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
+      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
+                                                            : cluster_config.alt_stat_name()));
+  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
+      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
+      singleton_manager_, tls_, validation_visitor_, *api_);
+  StrictDnsClusterImpl cluster(cluster_config, runtime_, dns_resolver_, factory_context,
+                               std::move(scope), false);
+  cluster.initialize([] {});
+
+  // Failing response kicks the failure refresh backoff strategy.
+  ON_CALL(random_, random()).WillByDefault(Return(8000));
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(1000), _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Failure,
+                         TestUtility::makeDnsResponse({}));
+
+  // Successful call should reset the failure backoff strategy.
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({}));
+
+  // Therefore, a subsequent failure should get a [0,base * 1] refresh.
+  ON_CALL(random_, random()).WillByDefault(Return(8000));
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(1000), _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Failure,
+                         TestUtility::makeDnsResponse({}));
+}
+
+TEST_F(StrictDnsClusterImplTest, TtlAsDnsRefreshRate) {
+  ResolverData resolver(*dns_resolver_, dispatcher_);
+
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    dns_refresh_rate: 4s
+    respect_dns_ttl: true
+    hosts: [{ socket_address: { address: localhost1, port_value: 11001 }}]
+  )EOF";
+
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
+      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
+                                                            : cluster_config.alt_stat_name()));
+  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
+      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
+      singleton_manager_, tls_, validation_visitor_, *api_);
+  StrictDnsClusterImpl cluster(cluster_config, runtime_, dns_resolver_, factory_context,
+                               std::move(scope), false);
+  ReadyWatcher membership_updated;
+  cluster.prioritySet().addPriorityUpdateCb(
+      [&](uint32_t, const HostVector&, const HostVector&) -> void { membership_updated.ready(); });
+
+  cluster.initialize([] {});
+
+  // TTL is recorded when the DNS response is successful and not empty
+  EXPECT_CALL(membership_updated, ready());
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(5000), _));
+  resolver.dns_callback_(
+      Network::DnsResolver::ResolutionStatus::Success,
+      TestUtility::makeDnsResponse({"192.168.1.1", "192.168.1.2"}, std::chrono::seconds(5)));
+
+  // If the response is successful but empty, the cluster uses the cluster configured refresh rate.
+  EXPECT_CALL(membership_updated, ready());
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Success,
+                         TestUtility::makeDnsResponse({}, std::chrono::seconds(5)));
+
+  // On failure, the cluster uses the cluster configured refresh rate.
+  EXPECT_CALL(*resolver.timer_, enableTimer(std::chrono::milliseconds(4000), _));
+  resolver.dns_callback_(Network::DnsResolver::ResolutionStatus::Failure,
+                         TestUtility::makeDnsResponse({}, std::chrono::seconds(5)));
+}
+
+// Ensures that HTTP/2 user defined SETTINGS parameter validation is enforced on clusters.
+TEST_F(StrictDnsClusterImplTest, Http2UserDefinedSettingsParametersValidation) {
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: strict_dns
+    dns_refresh_rate: 4s
+    dns_failure_refresh_rate:
+      base_interval: 7s
+      max_interval: 10s
+    lb_policy: round_robin
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 43
+        max_pending_requests: 57
+        max_requests: 50
+        max_retries: 10
+      - priority: HIGH
+        max_connections: 1
+        max_pending_requests: 2
+        max_requests: 3
+        max_retries: 4
+    max_requests_per_connection: 3
+    protocol_selection: USE_DOWNSTREAM_PROTOCOL
+    http2_protocol_options:
+      hpack_table_size: 2048
+      custom_settings_parameters: { identifier: 1, value: 1024 }
+    http_protocol_options:
+      header_key_format:
+        proper_case_words: {}
+    hosts:
+    - { socket_address: { address: localhost1, port_value: 11001 }}
+    - { socket_address: { address: localhost2, port_value: 11002 }}
+  )EOF";
+
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
+      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
+                                                            : cluster_config.alt_stat_name()));
+  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
+      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
+      singleton_manager_, tls_, validation_visitor_, *api_);
+  EXPECT_THROW_WITH_REGEX(
+      StrictDnsClusterImpl(cluster_config, runtime_, dns_resolver_, factory_context,
+                           std::move(scope), false),
+      EnvoyException,
+      R"(the \{hpack_table_size\} HTTP/2 SETTINGS parameter\(s\) can not be configured through)"
+      " both");
 }
 
 TEST(HostImplTest, HostCluster) {
@@ -900,7 +1103,9 @@ TEST(HostImplTest, Weight) {
 
   EXPECT_EQ(1U, makeTestHost(cluster.info_, "tcp://10.0.0.1:1234", 0)->weight());
   EXPECT_EQ(128U, makeTestHost(cluster.info_, "tcp://10.0.0.1:1234", 128)->weight());
-  EXPECT_EQ(128U, makeTestHost(cluster.info_, "tcp://10.0.0.1:1234", 129)->weight());
+  EXPECT_EQ(std::numeric_limits<uint32_t>::max(),
+            makeTestHost(cluster.info_, "tcp://10.0.0.1:1234", std::numeric_limits<uint32_t>::max())
+                ->weight());
 
   HostSharedPtr host = makeTestHost(cluster.info_, "tcp://10.0.0.1:1234", 50);
   EXPECT_EQ(50U, host->weight());
@@ -908,24 +1113,24 @@ TEST(HostImplTest, Weight) {
   EXPECT_EQ(51U, host->weight());
   host->weight(0);
   EXPECT_EQ(1U, host->weight());
-  host->weight(129);
-  EXPECT_EQ(128U, host->weight());
+  host->weight(std::numeric_limits<uint32_t>::max());
+  EXPECT_EQ(std::numeric_limits<uint32_t>::max(), host->weight());
 }
 
 TEST(HostImplTest, HostnameCanaryAndLocality) {
   MockClusterMockPrioritySet cluster;
-  envoy::api::v2::core::Metadata metadata;
+  envoy::config::core::v3::Metadata metadata;
   Config::Metadata::mutableMetadataValue(metadata, Config::MetadataFilters::get().ENVOY_LB,
                                          Config::MetadataEnvoyLbKeys::get().CANARY)
       .set_bool_value(true);
-  envoy::api::v2::core::Locality locality;
+  envoy::config::core::v3::Locality locality;
   locality.set_region("oceania");
   locality.set_zone("hello");
   locality.set_sub_zone("world");
   HostImpl host(cluster.info_, "lyft.com", Network::Utility::resolveUrl("tcp://10.0.0.1:1234"),
-                metadata, 1, locality,
-                envoy::api::v2::endpoint::Endpoint::HealthCheckConfig::default_instance(), 1,
-                envoy::api::v2::core::HealthStatus::UNKNOWN);
+                std::make_shared<const envoy::config::core::v3::Metadata>(metadata), 1, locality,
+                envoy::config::endpoint::v3::Endpoint::HealthCheckConfig::default_instance(), 1,
+                envoy::config::core::v3::UNKNOWN);
   EXPECT_EQ(cluster.info_.get(), &host.cluster());
   EXPECT_EQ("lyft.com", host.hostname());
   EXPECT_TRUE(host.canary());
@@ -975,13 +1180,23 @@ TEST(HostImplTest, HealthPipeAddress) {
   EXPECT_THROW_WITH_MESSAGE(
       {
         std::shared_ptr<MockClusterInfo> info{new NiceMock<MockClusterInfo>()};
-        envoy::api::v2::endpoint::Endpoint::HealthCheckConfig config;
+        envoy::config::endpoint::v3::Endpoint::HealthCheckConfig config;
         config.set_port_value(8000);
-        HostDescriptionImpl descr(info, "", Network::Utility::resolveUrl("unix://foo"),
-                                  envoy::api::v2::core::Metadata::default_instance(),
-                                  envoy::api::v2::core::Locality().default_instance(), config, 1);
+        HostDescriptionImpl descr(info, "", Network::Utility::resolveUrl("unix://foo"), nullptr,
+                                  envoy::config::core::v3::Locality().default_instance(), config,
+                                  1);
       },
       EnvoyException, "Invalid host configuration: non-zero port for non-IP address");
+}
+
+// Test that hostname flag from the health check config propagates.
+TEST(HostImplTest, HealthcheckHostname) {
+  std::shared_ptr<MockClusterInfo> info{new NiceMock<MockClusterInfo>()};
+  envoy::config::endpoint::v3::Endpoint::HealthCheckConfig config;
+  config.set_hostname("foo");
+  HostDescriptionImpl descr(info, "", Network::Utility::resolveUrl("tcp://1.2.3.4:80"), nullptr,
+                            envoy::config::core::v3::Locality().default_instance(), config, 1);
+  EXPECT_EQ("foo", descr.hostnameForHealthChecks());
 }
 
 class StaticClusterImplTest : public testing::Test, public UpstreamImplTestBase {};
@@ -998,33 +1213,7 @@ TEST_F(StaticClusterImplTest, InitialHosts) {
         port_value: 443
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
-  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
-      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
-                                                            : cluster_config.alt_stat_name()));
-  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
-      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
-      singleton_manager_, tls_, validation_visitor_, *api_);
-  StaticClusterImpl cluster(cluster_config, runtime_, factory_context, std::move(scope), false);
-  cluster.initialize([] {});
-
-  EXPECT_EQ(1UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
-  EXPECT_EQ("", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[0]->hostname());
-  EXPECT_FALSE(cluster.info()->addedViaApi());
-}
-
-TEST_F(StaticClusterImplTest, EmptyHostname) {
-  const std::string json = R"EOF(
-  {
-    "name": "staticcluster",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "random",
-    "hosts": [{"url": "tcp://10.0.0.1:11001"}]
-  }
-  )EOF";
-
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1059,7 +1248,7 @@ TEST_F(StaticClusterImplTest, LoadAssignmentEmptyHostname) {
               port_value: 8000
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1072,6 +1261,77 @@ TEST_F(StaticClusterImplTest, LoadAssignmentEmptyHostname) {
   EXPECT_EQ(1UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
   EXPECT_EQ("", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[0]->hostname());
   EXPECT_EQ(100, cluster.prioritySet().hostSetsPerPriority()[0]->overprovisioningFactor());
+  EXPECT_FALSE(cluster.info()->addedViaApi());
+}
+
+TEST_F(StaticClusterImplTest, LoadAssignmentNonEmptyHostname) {
+  const std::string yaml = R"EOF(
+    name: staticcluster
+    connect_timeout: 0.25s
+    type: STATIC
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            hostname: foo
+            address:
+              socket_address:
+                address: 10.0.0.1
+                port_value: 443
+            health_check_config:
+              port_value: 8000
+  )EOF";
+
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
+      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
+                                                            : cluster_config.alt_stat_name()));
+  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
+      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
+      singleton_manager_, tls_, validation_visitor_, *api_);
+  StaticClusterImpl cluster(cluster_config, runtime_, factory_context, std::move(scope), false);
+  cluster.initialize([] {});
+
+  EXPECT_EQ(1UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
+  EXPECT_EQ("foo", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[0]->hostname());
+  EXPECT_FALSE(cluster.info()->addedViaApi());
+}
+
+TEST_F(StaticClusterImplTest, LoadAssignmentNonEmptyHostnameWithHealthChecks) {
+  const std::string yaml = R"EOF(
+    name: staticcluster
+    connect_timeout: 0.25s
+    type: STATIC
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            hostname: foo
+            address:
+              socket_address:
+                address: 10.0.0.1
+                port_value: 443
+            health_check_config:
+              port_value: 8000
+              hostname: "foo2"
+  )EOF";
+
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
+      "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
+                                                            : cluster_config.alt_stat_name()));
+  Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
+      admin_, ssl_context_manager_, *scope, cm_, local_info_, dispatcher_, random_, stats_,
+      singleton_manager_, tls_, validation_visitor_, *api_);
+  StaticClusterImpl cluster(cluster_config, runtime_, factory_context, std::move(scope), false);
+  cluster.initialize([] {});
+
+  EXPECT_EQ(1UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
+  EXPECT_EQ("foo", cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[0]->hostname());
+  EXPECT_EQ("foo2",
+            cluster.prioritySet().hostSetsPerPriority()[0]->hosts()[0]->hostnameForHealthChecks());
   EXPECT_FALSE(cluster.info()->addedViaApi());
 }
 
@@ -1111,7 +1371,7 @@ TEST_F(StaticClusterImplTest, LoadAssignmentMultiplePriorities) {
               port_value: 8000
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1156,7 +1416,7 @@ TEST_F(StaticClusterImplTest, LoadAssignmentLocality) {
               port_value: 8000
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1178,7 +1438,8 @@ TEST_F(StaticClusterImplTest, LoadAssignmentLocality) {
   EXPECT_FALSE(cluster.info()->addedViaApi());
 }
 
-// Validates that setting an EDS health value through LoadAssignment is honored for static clusters.
+// Validates that setting an EDS health value through LoadAssignment is honored for static
+// clusters.
 TEST_F(StaticClusterImplTest, LoadAssignmentEdsHealth) {
   const std::string yaml = R"EOF(
     name: staticcluster
@@ -1201,7 +1462,7 @@ TEST_F(StaticClusterImplTest, LoadAssignmentEdsHealth) {
   )EOF";
 
   NiceMock<MockClusterManager> cm;
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1226,7 +1487,7 @@ TEST_F(StaticClusterImplTest, AltStatName) {
     hosts: [{ socket_address: { address: 10.0.0.1, port_value: 443 }}]
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1241,17 +1502,15 @@ TEST_F(StaticClusterImplTest, AltStatName) {
 }
 
 TEST_F(StaticClusterImplTest, RingHash) {
-  const std::string json = R"EOF(
-  {
-    "name": "staticcluster",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "ring_hash",
-    "hosts": [{"url": "tcp://10.0.0.1:11001"}]
-  }
+  const std::string yaml = R"EOF(
+    name: staticcluster
+    connect_timeout: 0.25s
+    type: static
+    lb_policy: ring_hash
+    hosts: [{ socket_address: { address: 10.0.0.1, port_value: 11001 }}]
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1267,18 +1526,17 @@ TEST_F(StaticClusterImplTest, RingHash) {
 }
 
 TEST_F(StaticClusterImplTest, OutlierDetector) {
-  const std::string json = R"EOF(
-  {
-    "name": "addressportconfig",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "random",
-    "hosts": [{"url": "tcp://10.0.0.1:11001"},
-              {"url": "tcp://10.0.0.2:11002"}]
-  }
+  const std::string yaml = R"EOF(
+    name: addressportconfig
+    connect_timeout: 0.25s
+    type: static
+    lb_policy: random
+    hosts:
+    - { socket_address: { address: 10.0.0.1, port_value: 11001 }}
+    - { socket_address: { address: 10.0.0.1, port_value: 11002 }}
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1316,18 +1574,17 @@ TEST_F(StaticClusterImplTest, OutlierDetector) {
 }
 
 TEST_F(StaticClusterImplTest, HealthyStat) {
-  const std::string json = R"EOF(
-  {
-    "name": "addressportconfig",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "random",
-    "hosts": [{"url": "tcp://10.0.0.1:11001"},
-              {"url": "tcp://10.0.0.2:11002"}]
-  }
+  const std::string yaml = R"EOF(
+    name: addressportconfig
+    connect_timeout: 0.25s
+    type: static
+    lb_policy: random
+    hosts:
+    - { socket_address: { address: 10.0.0.1, port_value: 11001 }}
+    - { socket_address: { address: 10.0.0.1, port_value: 11002 }}
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1448,18 +1705,17 @@ TEST_F(StaticClusterImplTest, HealthyStat) {
 }
 
 TEST_F(StaticClusterImplTest, UrlConfig) {
-  const std::string json = R"EOF(
-  {
-    "name": "addressportconfig",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "random",
-    "hosts": [{"url": "tcp://10.0.0.1:11001"},
-              {"url": "tcp://10.0.0.2:11002"}]
-  }
+  const std::string yaml = R"EOF(
+    name: addressportconfig
+    connect_timeout: 0.25s
+    type: static
+    lb_policy: random
+    hosts:
+    - { socket_address: { address: 10.0.0.1, port_value: 11001 }}
+    - { socket_address: { address: 10.0.0.2, port_value: 11002 }}
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1479,8 +1735,8 @@ TEST_F(StaticClusterImplTest, UrlConfig) {
   EXPECT_EQ(1024U, cluster.info()->resourceManager(ResourcePriority::High).requests().max());
   EXPECT_EQ(3U, cluster.info()->resourceManager(ResourcePriority::High).retries().max());
   EXPECT_EQ(0U, cluster.info()->maxRequestsPerConnection());
-  EXPECT_EQ(Http::Http2Settings::DEFAULT_HPACK_TABLE_SIZE,
-            cluster.info()->http2Settings().hpack_table_size_);
+  EXPECT_EQ(::Envoy::Http2::Utility::OptionsLimits::DEFAULT_HPACK_TABLE_SIZE,
+            cluster.info()->http2Options().hpack_table_size().value());
   EXPECT_EQ(LoadBalancerType::Random, cluster.info()->lbType());
   EXPECT_THAT(
       std::list<std::string>({"10.0.0.1:11001", "10.0.0.2:11002"}),
@@ -1493,20 +1749,24 @@ TEST_F(StaticClusterImplTest, UrlConfig) {
 }
 
 TEST_F(StaticClusterImplTest, UnsupportedLBType) {
-  const std::string json = R"EOF(
-  {
-    "name": "addressportconfig",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "fakelbtype",
-    "hosts": [{"url": "tcp://192.168.1.1:22"},
-              {"url": "tcp://192.168.1.2:44"}]
-  }
+  const std::string yaml = R"EOF(
+    name: addressportconfig
+    connect_timeout: 0.25s
+    type: static
+    lb_policy: fakelbtype
+    load_assignment:
+      cluster_name: addressportconfig
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: 192.168.1.1, port_value: 22 }
+              socket_address: { address: 192.168.1.2, port_value: 44 }
   )EOF";
 
   EXPECT_THROW_WITH_MESSAGE(
       {
-        envoy::api::v2::Cluster cluster_config = parseClusterFromJson(json);
+        envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
         Envoy::Stats::ScopePtr scope =
             stats_.createScope(fmt::format("cluster.{}.", cluster_config.alt_stat_name().empty()
                                                               ? cluster_config.name()
@@ -1518,10 +1778,9 @@ TEST_F(StaticClusterImplTest, UnsupportedLBType) {
                                   false);
       },
       EnvoyException,
-      "JSON at lines 2-9 does not conform to schema.\n"
-      " Invalid schema: #/properties/lb_type\n"
-      " Schema violation: enum\n"
-      " Offending document key: #/lb_type");
+      "Protobuf message (type envoy.config.cluster.v3.Cluster reason "
+      "INVALID_ARGUMENT:(lb_policy): invalid "
+      "value \"fakelbtype\" for type TYPE_ENUM) has unknown fields");
 }
 
 TEST_F(StaticClusterImplTest, MalformedHostIP) {
@@ -1533,7 +1792,7 @@ TEST_F(StaticClusterImplTest, MalformedHostIP) {
     hosts: [{ socket_address: { address: foo.bar.com }}]
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1561,7 +1820,7 @@ TEST_F(StaticClusterImplTest, NoHostsTest) {
       - priority: 1
   )EOF";
 
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope =
       stats_.createScope(fmt::format("cluster.{}.", cluster_config.name()));
   Envoy::Server::Configuration::TransportSocketFactoryContextImpl factory_context(
@@ -1573,40 +1832,8 @@ TEST_F(StaticClusterImplTest, NoHostsTest) {
   EXPECT_EQ(0UL, cluster.prioritySet().hostSetsPerPriority()[0]->healthyHosts().size());
 }
 
-TEST(ClusterDefinitionTest, BadClusterConfig) {
-  const std::string json = R"EOF(
-  {
-    "name": "cluster_1",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "round_robin",
-    "fake_type" : "expected_failure",
-    "hosts": [{"url": "tcp://127.0.0.1:11001"}]
-  }
-  )EOF";
-
-  Json::ObjectSharedPtr loader = Json::Factory::loadFromString(json);
-  EXPECT_THROW(loader->validateSchema(Json::Schema::CLUSTER_SCHEMA), Json::Exception);
-}
-
-TEST(ClusterDefinitionTest, BadDnsClusterConfig) {
-  const std::string json = R"EOF(
-  {
-    "name": "cluster_1",
-    "connect_timeout_ms": 250,
-    "type": "static",
-    "lb_type": "round_robin",
-    "hosts": [{"url": "tcp://127.0.0.1:11001"}],
-    "dns_lookup_family" : "foo"
-  }
-  )EOF";
-
-  Json::ObjectSharedPtr loader = Json::Factory::loadFromString(json);
-  EXPECT_THROW(loader->validateSchema(Json::Schema::CLUSTER_SCHEMA), Json::Exception);
-}
-
 TEST_F(StaticClusterImplTest, SourceAddressPriority) {
-  envoy::api::v2::Cluster config;
+  envoy::config::cluster::v3::Cluster config;
   config.set_name("staticcluster");
   config.mutable_connect_timeout();
 
@@ -1664,7 +1891,7 @@ TEST_F(ClusterImplTest, CloseConnectionsOnHostHealthFailure) {
     close_connections_on_host_health_failure: true
     hosts: [{ socket_address: { address: foo.bar.com, port_value: 443 }}]
   )EOF";
-  envoy::api::v2::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
+  envoy::config::cluster::v3::Cluster cluster_config = parseClusterFromV2Yaml(yaml);
   Envoy::Stats::ScopePtr scope = stats_.createScope(fmt::format(
       "cluster.{}.", cluster_config.alt_stat_name().empty() ? cluster_config.name()
                                                             : cluster_config.alt_stat_name()));
@@ -1776,8 +2003,8 @@ TEST(PrioritySet, Extend) {
   // Test batch host updates. Verify that we can move a host without triggering intermediate host
   // updates.
 
-  // We're going to do a noop host change, so add a callback to assert that we're not announcing any
-  // host changes.
+  // We're going to do a noop host change, so add a callback to assert that we're not announcing
+  // any host changes.
   priority_set.addMemberUpdateCb([&](const HostVector& added, const HostVector& removed) -> void {
     EXPECT_TRUE(added.empty() && removed.empty());
   });
@@ -1807,7 +2034,7 @@ public:
                                                   *factory_context_, std::move(scope_), false);
   }
 
-  Stats::IsolatedStoreImpl stats_;
+  Stats::TestUtil::TestStore stats_;
   Ssl::MockContextManager ssl_context_manager_;
   std::shared_ptr<Network::MockDnsResolver> dns_resolver_{new NiceMock<Network::MockDnsResolver>()};
   NiceMock<Event::MockDispatcher> dispatcher_;
@@ -1816,10 +2043,10 @@ public:
   NiceMock<LocalInfo::MockLocalInfo> local_info_;
   NiceMock<Runtime::MockRandomGenerator> random_;
   NiceMock<Server::MockAdmin> admin_;
-  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest().currentThreadId()};
+  Singleton::ManagerImpl singleton_manager_{Thread::threadFactoryForTest()};
   NiceMock<ThreadLocal::MockInstance> tls_;
   ReadyWatcher initialized_;
-  envoy::api::v2::Cluster cluster_config_;
+  envoy::config::cluster::v3::Cluster cluster_config_;
   Envoy::Stats::ScopePtr scope_;
   std::unique_ptr<Server::Configuration::TransportSocketFactoryContextImpl> factory_context_;
   NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor_;
@@ -1835,10 +2062,10 @@ struct Baz : public Envoy::Config::TypedMetadata::Object {
 
 class BazFactory : public ClusterTypedMetadataFactory {
 public:
-  const std::string name() const { return "baz"; }
+  std::string name() const override { return "baz"; }
   // Returns nullptr (conversion failure) if d is empty.
   std::unique_ptr<const Envoy::Config::TypedMetadata::Object>
-  parse(const ProtobufWkt::Struct& d) const {
+  parse(const ProtobufWkt::Struct& d) const override {
     if (d.fields().find("name") != d.fields().end()) {
       return std::make_unique<Baz>(d.fields().at("name").string_value());
     }
@@ -1868,7 +2095,7 @@ TEST_F(ClusterInfoImplTest, Metadata) {
   EXPECT_EQ("meh", cluster->info()->typedMetadata().get<Baz>(baz_factory.name())->name);
   EXPECT_EQ(nullptr, cluster->info()->typedMetadata().get<Foo>(baz_factory.name()));
   EXPECT_EQ("test_value",
-            Config::Metadata::metadataValue(cluster->info()->metadata(), "com.bar.foo", "baz")
+            Config::Metadata::metadataValue(&cluster->info()->metadata(), "com.bar.foo", "baz")
                 .string_value());
   EXPECT_EQ(0.3, cluster->info()->lbConfig().healthy_panic_threshold().value());
   EXPECT_EQ(LoadBalancerType::Maglev, cluster->info()->lbType());
@@ -1940,9 +2167,9 @@ TEST_F(ClusterInfoImplTest, ExtensionProtocolOptionsForUnknownFilter) {
       no_such_filter: { option: value }
   )EOF";
 
-  EXPECT_THROW_WITH_MESSAGE(
-      makeCluster(yaml), EnvoyException,
-      "Didn't find a registered network or http filter implementation for name: 'no_such_filter'");
+  EXPECT_THROW_WITH_MESSAGE(makeCluster(yaml), EnvoyException,
+                            "Didn't find a registered network or http filter implementation for "
+                            "name: 'no_such_filter'");
 }
 
 TEST_F(ClusterInfoImplTest, TypedExtensionProtocolOptionsForUnknownFilter) {
@@ -1957,9 +2184,9 @@ TEST_F(ClusterInfoImplTest, TypedExtensionProtocolOptionsForUnknownFilter) {
         "@type": type.googleapis.com/google.protobuf.Struct
   )EOF";
 
-  EXPECT_THROW_WITH_MESSAGE(
-      makeCluster(yaml), EnvoyException,
-      "Didn't find a registered network or http filter implementation for name: 'no_such_filter'");
+  EXPECT_THROW_WITH_MESSAGE(makeCluster(yaml), EnvoyException,
+                            "Didn't find a registered network or http filter implementation for "
+                            "name: 'no_such_filter'");
 }
 
 TEST_F(ClusterInfoImplTest, OneofExtensionProtocolOptionsForUnknownFilter) {
@@ -2027,6 +2254,100 @@ TEST_F(ClusterInfoImplTest, TestTrackRemainingResourcesGauges) {
   EXPECT_EQ(4U, high_remaining_retries.value());
 }
 
+TEST_F(ClusterInfoImplTest, Timeouts) {
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: MAGLEV
+    hosts: [{ socket_address: { address: foo.bar.com, port_value: 443 }}]
+    metadata: { filter_metadata: { com.bar.foo: { baz: test_value },
+                                   baz: {name: meh } } }
+    common_lb_config:
+      healthy_panic_threshold:
+        value: 0.3
+  )EOF";
+
+  BazFactory baz_factory;
+  Registry::InjectFactory<ClusterTypedMetadataFactory> registered_factory(baz_factory);
+  auto cluster1 = makeCluster(yaml);
+  ASSERT_TRUE(cluster1->info()->idleTimeout().has_value());
+  EXPECT_EQ(std::chrono::hours(1), cluster1->info()->idleTimeout().value());
+
+  const std::string explicit_timeout = R"EOF(
+    common_http_protocol_options:
+      idle_timeout: 1s
+  )EOF";
+
+  auto cluster2 = makeCluster(yaml + explicit_timeout);
+  ASSERT_TRUE(cluster2->info()->idleTimeout().has_value());
+  EXPECT_EQ(std::chrono::seconds(1), cluster2->info()->idleTimeout().value());
+
+  const std::string no_timeout = R"EOF(
+    common_http_protocol_options:
+      idle_timeout: 0s
+  )EOF";
+  auto cluster3 = makeCluster(yaml + no_timeout);
+  EXPECT_FALSE(cluster3->info()->idleTimeout().has_value());
+}
+
+TEST_F(ClusterInfoImplTest, TestTrackTimeoutBudgets) {
+  // Check that without the flag specified, the histogram is null.
+  const std::string yaml_disabled = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+  )EOF";
+
+  auto cluster = makeCluster(yaml_disabled);
+  // The stats will be null if they have not been explicitly turned on.
+  EXPECT_FALSE(cluster->info()->timeoutBudgetStats().has_value());
+
+  // Check that with the flag, the histogram is created.
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    track_timeout_budgets: true
+  )EOF";
+
+  cluster = makeCluster(yaml);
+  // The stats should be created.
+  EXPECT_TRUE(cluster->info()->timeoutBudgetStats().has_value());
+  EXPECT_EQ(Stats::Histogram::Unit::Unspecified,
+            cluster->info()->timeoutBudgetStats()->upstream_rq_timeout_budget_percent_used_.unit());
+}
+
+// Validates HTTP2 SETTINGS config.
+TEST_F(ClusterInfoImplTest, Http2ProtocolOptions) {
+  const std::string yaml = R"EOF(
+    name: name
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    http2_protocol_options:
+      hpack_table_size: 2048
+      initial_stream_window_size: 65536
+      custom_settings_parameters:
+        - identifier: 0x10
+          value: 10
+        - identifier: 0x12
+          value: 12
+  )EOF";
+
+  auto cluster = makeCluster(yaml);
+  EXPECT_EQ(cluster->info()->http2Options().hpack_table_size().value(), 2048);
+  EXPECT_EQ(cluster->info()->http2Options().initial_stream_window_size().value(), 65536);
+  EXPECT_EQ(cluster->info()->http2Options().custom_settings_parameters()[0].identifier().value(),
+            0x10);
+  EXPECT_EQ(cluster->info()->http2Options().custom_settings_parameters()[0].value().value(), 10);
+  EXPECT_EQ(cluster->info()->http2Options().custom_settings_parameters()[1].identifier().value(),
+            0x12);
+  EXPECT_EQ(cluster->info()->http2Options().custom_settings_parameters()[1].value().value(), 12);
+}
+
 class TestFilterConfigFactoryBase {
 public:
   TestFilterConfigFactoryBase(
@@ -2050,10 +2371,6 @@ public:
   TestNetworkFilterConfigFactory(TestFilterConfigFactoryBase& parent) : parent_(parent) {}
 
   // NamedNetworkFilterConfigFactory
-  Network::FilterFactoryCb createFilterFactory(const Json::Object&,
-                                               Server::Configuration::FactoryContext&) override {
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
-  }
   Network::FilterFactoryCb
   createFilterFactoryFromProto(const Protobuf::Message&,
                                Server::Configuration::FactoryContext&) override {
@@ -2064,10 +2381,12 @@ public:
     return parent_.createEmptyProtocolOptionsProto();
   }
   Upstream::ProtocolOptionsConfigConstSharedPtr
-  createProtocolOptionsConfig(const Protobuf::Message& msg) override {
+  createProtocolOptionsConfig(const Protobuf::Message& msg,
+                              ProtobufMessage::ValidationVisitor&) override {
     return parent_.createProtocolOptionsConfig(msg);
   }
-  std::string name() override { CONSTRUCT_ON_FIRST_USE(std::string, "envoy.test.filter"); }
+  std::string name() const override { CONSTRUCT_ON_FIRST_USE(std::string, "envoy.test.filter"); }
+  std::string configType() override { return ""; };
 
   TestFilterConfigFactoryBase& parent_;
 };
@@ -2077,10 +2396,6 @@ public:
   TestHttpFilterConfigFactory(TestFilterConfigFactoryBase& parent) : parent_(parent) {}
 
   // NamedNetworkFilterConfigFactory
-  Http::FilterFactoryCb createFilterFactory(const Json::Object&, const std::string&,
-                                            Server::Configuration::FactoryContext&) override {
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
-  }
   Http::FilterFactoryCb
   createFilterFactoryFromProto(const Protobuf::Message&, const std::string&,
                                Server::Configuration::FactoryContext&) override {
@@ -2092,7 +2407,8 @@ public:
   }
   Router::RouteSpecificFilterConfigConstSharedPtr
   createRouteSpecificFilterConfig(const Protobuf::Message&,
-                                  Server::Configuration::FactoryContext&) override {
+                                  Server::Configuration::ServerFactoryContext&,
+                                  ProtobufMessage::ValidationVisitor&) override {
     NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
   }
 
@@ -2100,10 +2416,12 @@ public:
     return parent_.createEmptyProtocolOptionsProto();
   }
   Upstream::ProtocolOptionsConfigConstSharedPtr
-  createProtocolOptionsConfig(const Protobuf::Message& msg) override {
+  createProtocolOptionsConfig(const Protobuf::Message& msg,
+                              ProtobufMessage::ValidationVisitor&) override {
     return parent_.createProtocolOptionsConfig(msg);
   }
-  std::string name() override { CONSTRUCT_ON_FIRST_USE(std::string, "envoy.test.filter"); }
+  std::string name() const override { CONSTRUCT_ON_FIRST_USE(std::string, "envoy.test.filter"); }
+  std::string configType() override { return ""; };
 
   TestFilterConfigFactoryBase& parent_;
 };
@@ -2251,6 +2569,59 @@ TEST_F(ClusterInfoImplTest, ExtensionProtocolOptionsForFilterWithOptions) {
   }
 }
 
+TEST_F(ClusterInfoImplTest, UseDownstreamHttpProtocol) {
+  const std::string yaml = R"EOF(
+  name: name
+  connect_timeout: 0.25s
+  type: STRICT_DNS
+  lb_policy: ROUND_ROBIN
+  protocol_selection: USE_DOWNSTREAM_PROTOCOL
+)EOF";
+
+  auto cluster = makeCluster(yaml);
+
+  EXPECT_EQ(Http::Protocol::Http10,
+            cluster->info()->upstreamHttpProtocol({Http::Protocol::Http10}));
+  EXPECT_EQ(Http::Protocol::Http11,
+            cluster->info()->upstreamHttpProtocol({Http::Protocol::Http11}));
+  EXPECT_EQ(Http::Protocol::Http2, cluster->info()->upstreamHttpProtocol({Http::Protocol::Http2}));
+}
+
+TEST_F(ClusterInfoImplTest, UpstreamHttp2Protocol) {
+  const std::string yaml = R"EOF(
+  name: name
+  connect_timeout: 0.25s
+  type: STRICT_DNS
+  lb_policy: ROUND_ROBIN
+  http2_protocol_options: {}
+)EOF";
+
+  auto cluster = makeCluster(yaml);
+
+  EXPECT_EQ(Http::Protocol::Http2, cluster->info()->upstreamHttpProtocol(absl::nullopt));
+  EXPECT_EQ(Http::Protocol::Http2, cluster->info()->upstreamHttpProtocol({Http::Protocol::Http10}));
+  EXPECT_EQ(Http::Protocol::Http2, cluster->info()->upstreamHttpProtocol({Http::Protocol::Http11}));
+  EXPECT_EQ(Http::Protocol::Http2, cluster->info()->upstreamHttpProtocol({Http::Protocol::Http2}));
+}
+
+TEST_F(ClusterInfoImplTest, UpstreamHttp11Protocol) {
+  const std::string yaml = R"EOF(
+  name: name
+  connect_timeout: 0.25s
+  type: STRICT_DNS
+  lb_policy: ROUND_ROBIN
+)EOF";
+
+  auto cluster = makeCluster(yaml);
+
+  EXPECT_EQ(Http::Protocol::Http11, cluster->info()->upstreamHttpProtocol(absl::nullopt));
+  EXPECT_EQ(Http::Protocol::Http11,
+            cluster->info()->upstreamHttpProtocol({Http::Protocol::Http10}));
+  EXPECT_EQ(Http::Protocol::Http11,
+            cluster->info()->upstreamHttpProtocol({Http::Protocol::Http11}));
+  EXPECT_EQ(Http::Protocol::Http11, cluster->info()->upstreamHttpProtocol({Http::Protocol::Http2}));
+}
+
 // Validate empty singleton for HostsPerLocalityImpl.
 TEST(HostsPerLocalityImpl, Empty) {
   EXPECT_FALSE(HostsPerLocalityImpl::empty()->hasLocalLocality());
@@ -2345,8 +2716,8 @@ TEST_F(HostSetImplLocalityTest, AllUnhealthy) {
 // When a locality has endpoints that have not yet been warmed, weight calculation should ignore
 // these hosts.
 TEST_F(HostSetImplLocalityTest, NotWarmedHostsLocality) {
-  // We have two localities with 3 hosts in L1, 2 hosts in L2. Two of the hosts in L1 are not warmed
-  // yet, so even though they are unhealthy we should not adjust the locality weight.
+  // We have two localities with 3 hosts in L1, 2 hosts in L2. Two of the hosts in L1 are not
+  // warmed yet, so even though they are unhealthy we should not adjust the locality weight.
   HostsPerLocalitySharedPtr hosts_per_locality =
       makeHostsPerLocality({{hosts_[0], hosts_[1], hosts_[2]}, {hosts_[3], hosts_[4]}});
   LocalityWeightsConstSharedPtr locality_weights{new LocalityWeights{1, 1}};
@@ -2542,7 +2913,7 @@ TEST(OverProvisioningFactorTest, LocalityPickChanges) {
   setUpHostSetWithOPFAndTestPicks(200, 50, 50);
 };
 
-// Verifies that partionHosts correctly splits hosts based on their health flags.
+// Verifies that partitionHosts correctly splits hosts based on their health flags.
 TEST(HostPartitionTest, PartitionHosts) {
   std::shared_ptr<MockClusterInfo> info{new NiceMock<MockClusterInfo>()};
   HostVector hosts{

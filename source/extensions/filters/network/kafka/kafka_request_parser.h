@@ -8,6 +8,7 @@
 
 #include "extensions/filters/network/kafka/kafka_request.h"
 #include "extensions/filters/network/kafka/parser.h"
+#include "extensions/filters/network/kafka/tagged_fields.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -22,11 +23,29 @@ using RequestParserSharedPtr = std::shared_ptr<RequestParser>;
  * Context that is shared between parsers that are handling the same single message.
  */
 struct RequestContext {
-  int32_t remaining_request_size_{0};
-  RequestHeader request_header_{};
+
+  /**
+   * Bytes left to consume.
+   */
+  uint32_t remaining_request_size_{0};
+
+  /**
+   * Request header that gets filled in during the parse.
+   */
+  RequestHeader request_header_{-1, -1, -1, absl::nullopt};
+
+  /**
+   * Bytes left to consume.
+   */
+  uint32_t& remaining() { return remaining_request_size_; }
+
+  /**
+   * Returns data needed for construction of parse failure message.
+   */
+  const RequestHeader asFailureData() const { return request_header_; }
 };
 
-typedef std::shared_ptr<RequestContext> RequestContextSharedPtr;
+using RequestContextSharedPtr = std::shared_ptr<RequestContext>;
 
 /**
  * Request decoder configuration object.
@@ -81,12 +100,33 @@ private:
  * Can throw, as one of the fields (client-id) can throw (nullable string with invalid length).
  * @see http://kafka.apache.org/protocol.html#protocol_messages
  */
-class RequestHeaderDeserializer
-    : public CompositeDeserializerWith4Delegates<RequestHeader, Int16Deserializer,
-                                                 Int16Deserializer, Int32Deserializer,
-                                                 NullableStringDeserializer> {};
+class RequestHeaderDeserializer : public Deserializer<RequestHeader>,
+                                  private Logger::Loggable<Logger::Id::kafka> {
 
-typedef std::unique_ptr<RequestHeaderDeserializer> RequestHeaderDeserializerPtr;
+  // Request header, no matter what, has at least 4 fields. They are extracted here.
+  using CommonPartDeserializer =
+      CompositeDeserializerWith4Delegates<RequestHeader, Int16Deserializer, Int16Deserializer,
+                                          Int32Deserializer, NullableStringDeserializer>;
+
+public:
+  RequestHeaderDeserializer() = default;
+
+  uint32_t feed(absl::string_view& data) override;
+  bool ready() const override;
+  RequestHeader get() const override;
+
+private:
+  // Deserializer for the first 4 fields, that are present in every request header.
+  CommonPartDeserializer common_part_deserializer_;
+
+  // Tagged fields are used only in request header v2.
+  // This flag will be set depending on common part's result (api key & version), and will decide
+  // whether we want to feed data to tagged fields deserializer.
+  bool tagged_fields_present_;
+  TaggedFieldsDeserializer tagged_fields_deserializer_;
+};
+
+using RequestHeaderDeserializerPtr = std::unique_ptr<RequestHeaderDeserializer>;
 
 /**
  * Parser responsible for extracting the request header and putting it into context.
@@ -126,19 +166,14 @@ private:
  * api_key & api_version. It does not attempt to capture any data, just throws it away until end of
  * message.
  */
-class SentinelParser : public RequestParser {
+class SentinelParser : public AbstractSentinelParser<RequestContextSharedPtr, RequestParseResponse>,
+                       public RequestParser {
 public:
-  SentinelParser(RequestContextSharedPtr context) : context_{context} {};
+  SentinelParser(RequestContextSharedPtr context) : AbstractSentinelParser{context} {};
 
-  /**
-   * Returns failed parse data. Ignores (jumps over) the data provided.
-   */
-  RequestParseResponse parse(absl::string_view& data) override;
-
-  const RequestContextSharedPtr contextForTest() const { return context_; }
-
-private:
-  const RequestContextSharedPtr context_;
+  RequestParseResponse parse(absl::string_view& data) override {
+    return AbstractSentinelParser::parse(data);
+  }
 };
 
 /**

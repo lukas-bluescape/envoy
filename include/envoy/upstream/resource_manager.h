@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "envoy/common/pure.h"
 
@@ -20,7 +21,7 @@ const size_t NumResourcePriorities = 2;
  */
 class Resource {
 public:
-  virtual ~Resource() {}
+  virtual ~Resource() = default;
 
   /**
    * @return true if the resource can be created.
@@ -46,7 +47,26 @@ public:
    * @return the current maximum allowed number of this resource.
    */
   virtual uint64_t max() PURE;
+
+  /**
+   * @return the current resource count.
+   */
+  virtual uint64_t count() const PURE;
 };
+
+/**
+ * RAII wrapper that increments a resource on construction and decrements it on destruction.
+ */
+class ResourceAutoIncDec {
+public:
+  ResourceAutoIncDec(Resource& resource) : resource_(resource) { resource_.inc(); }
+  ~ResourceAutoIncDec() { resource_.dec(); }
+
+private:
+  Resource& resource_;
+};
+
+using ResourceAutoIncDecPtr = std::unique_ptr<ResourceAutoIncDec>;
 
 /**
  * Global resource manager that loosely synchronizes maximum connections, pending requests, etc.
@@ -55,10 +75,10 @@ public:
  */
 class ResourceManager {
 public:
-  virtual ~ResourceManager() {}
+  virtual ~ResourceManager() = default;
 
   /**
-   * @return Resource& active TCP connections.
+   * @return Resource& active TCP connections and UDP sessions.
    */
   virtual Resource& connections() PURE;
 

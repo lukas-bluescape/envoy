@@ -5,9 +5,8 @@ Getting Started
 
 This section gets you started with a very simple configuration and provides some example configurations.
 
-Envoy does not currently provide separate pre-built binaries, but does provide Docker images. This is
-the fastest way to get started using Envoy. Should you wish to use Envoy outside of a
-Docker container, you will need to :ref:`build it <building>`.
+The fastest way to get started using Envoy is :ref:`installing pre-built binaries <install_binaries>`.
+You can also :ref:`build it <building>` from source.
 
 These examples use the :ref:`v2 Envoy API <envoy_api_reference>`, but use only the static configuration
 feature of the API, which is most useful for simple requirements. For more complex requirements
@@ -53,7 +52,7 @@ which in this case is simply `0.0.0.0:9901`.
 
 The :ref:`static_resources <envoy_api_field_config.bootstrap.v2.Bootstrap.static_resources>` contains everything that is configured statically when Envoy starts,
 as opposed to the means of configuring resources dynamically when Envoy is running.
-The :ref:`v2 API Overview <config_overview_v2>` describes this.
+The :ref:`v2 API Overview <config_overview>` describes this.
 
 .. code-block:: yaml
 
@@ -69,7 +68,7 @@ The specification of the :ref:`listeners <envoy_api_file_envoy/api/v2/listener/l
           socket_address: { address: 0.0.0.0, port_value: 10000 }
         filter_chains:
         - filters:
-          - name: envoy.http_connection_manager
+          - name: envoy.filters.network.http_connection_manager
             typed_config:
               "@type": type.googleapis.com/envoy.config.filter.network.http_connection_manager.v2.HttpConnectionManager
               stat_prefix: ingress_http
@@ -83,7 +82,7 @@ The specification of the :ref:`listeners <envoy_api_file_envoy/api/v2/listener/l
                   - match: { prefix: "/" }
                     route: { host_rewrite: www.google.com, cluster: service_google }
               http_filters:
-              - name: envoy.router
+              - name: envoy.filters.http.router
 
 The specification of the :ref:`clusters <envoy_api_file_envoy/api/v2/cds.proto>`.
 
@@ -105,8 +104,11 @@ The specification of the :ref:`clusters <envoy_api_file_envoy/api/v2/cds.proto>`
                   socket_address:
                     address: www.google.com
                     port_value: 443
-        tls_context:
-          sni: www.google.com
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.api.v2.auth.UpstreamTlsContext
+            sni: www.google.com
 
 
 Using the Envoy Docker Image
@@ -156,7 +158,7 @@ gauge peoples' interests we will add more sandboxes demonstrating different
 features. The following sandboxes are available:
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
     sandboxes/cors
     sandboxes/csrf
@@ -165,6 +167,7 @@ features. The following sandboxes are available:
     sandboxes/grpc_bridge
     sandboxes/jaeger_native_tracing
     sandboxes/jaeger_tracing
+    sandboxes/load_reporting_service
     sandboxes/lua
     sandboxes/mysql
     sandboxes/redis
@@ -177,7 +180,7 @@ In addition to the proxy itself, Envoy is also bundled as part of several open
 source distributions that target specific use cases.
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
     distro/ambassador
     distro/gloo

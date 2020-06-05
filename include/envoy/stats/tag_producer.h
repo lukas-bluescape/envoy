@@ -14,7 +14,7 @@ namespace Stats {
 
 class TagProducer {
 public:
-  virtual ~TagProducer() {}
+  virtual ~TagProducer() = default;
 
   /**
    * Take a metric name and a vector then add proper tags into the vector and
@@ -27,12 +27,12 @@ public:
    * {"vcluster", "bar"}, and return "vhost.vcluster.c1".
    *
    * @param metric_name std::string a name of Stats::Metric (Counter, Gauge, Histogram).
-   * @param tags std::vector a set of Stats::Tag.
+   * @param tags TagVector a set of Stats::Tag.
    */
-  virtual std::string produceTags(absl::string_view metric_name, std::vector<Tag>& tags) const PURE;
+  virtual std::string produceTags(absl::string_view metric_name, TagVector& tags) const PURE;
 };
 
-typedef std::unique_ptr<const TagProducer> TagProducerPtr;
+using TagProducerPtr = std::unique_ptr<const TagProducer>;
 
 } // namespace Stats
 } // namespace Envoy

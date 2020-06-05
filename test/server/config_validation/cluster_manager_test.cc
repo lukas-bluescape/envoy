@@ -1,3 +1,4 @@
+#include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/upstream/resource_manager.h"
 #include "envoy/upstream/upstream.h"
 
@@ -30,7 +31,7 @@ namespace {
 TEST(ValidationClusterManagerTest, MockedMethods) {
   Stats::IsolatedStoreImpl stats_store;
   Event::SimulatedTimeSystem time_system;
-  NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor;
+  NiceMock<ProtobufMessage::MockValidationContext> validation_context;
   Api::ApiPtr api(Api::createApiForTest(stats_store, time_system));
   NiceMock<Runtime::MockLoader> runtime;
   NiceMock<ThreadLocal::MockInstance> tls;
@@ -42,20 +43,20 @@ TEST(ValidationClusterManagerTest, MockedMethods) {
   LocalInfo::MockLocalInfo local_info;
   NiceMock<Server::MockAdmin> admin;
   Http::ContextImpl http_context(stats_store.symbolTable());
+  Grpc::ContextImpl grpc_context(stats_store.symbolTable());
   AccessLog::MockAccessLogManager log_manager;
-  Singleton::ManagerImpl singleton_manager{Thread::threadFactoryForTest().currentThreadId()};
+  Singleton::ManagerImpl singleton_manager{Thread::threadFactoryForTest()};
 
-  ValidationClusterManagerFactory factory(admin, runtime, stats_store, tls, random, dns_resolver,
-                                          ssl_context_manager, dispatcher, local_info,
-                                          secret_manager, validation_visitor, *api, http_context,
-                                          log_manager, singleton_manager, time_system);
+  ValidationClusterManagerFactory factory(
+      admin, runtime, stats_store, tls, random, dns_resolver, ssl_context_manager, dispatcher,
+      local_info, secret_manager, validation_context, *api, http_context, grpc_context, log_manager,
+      singleton_manager, time_system);
 
-  const envoy::config::bootstrap::v2::Bootstrap bootstrap;
-  Stats::FakeSymbolTableImpl symbol_table;
+  const envoy::config::bootstrap::v3::Bootstrap bootstrap;
   ClusterManagerPtr cluster_manager = factory.clusterManagerFromProto(bootstrap);
   EXPECT_EQ(nullptr, cluster_manager->httpConnPoolForCluster("cluster", ResourcePriority::Default,
                                                              Http::Protocol::Http11, nullptr));
-  Host::CreateConnectionData data = cluster_manager->tcpConnForCluster("cluster", nullptr, nullptr);
+  Host::CreateConnectionData data = cluster_manager->tcpConnForCluster("cluster", nullptr);
   EXPECT_EQ(nullptr, data.connection_);
   EXPECT_EQ(nullptr, data.host_description_);
 

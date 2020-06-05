@@ -5,24 +5,19 @@
 // porting layer for QUICHE.
 
 #include <memory>
+#include <string>
 
 #include "extensions/quic_listeners/quiche/platform/flags_impl.h"
 
 #include "test/test_common/logging.h"
 
 #include "gtest/gtest.h"
-#include "quiche/http2/platform/api/http2_arraysize.h"
 #include "quiche/http2/platform/api/http2_bug_tracker.h"
 #include "quiche/http2/platform/api/http2_containers.h"
 #include "quiche/http2/platform/api/http2_estimate_memory_usage.h"
 #include "quiche/http2/platform/api/http2_flags.h"
 #include "quiche/http2/platform/api/http2_logging.h"
 #include "quiche/http2/platform/api/http2_macros.h"
-#include "quiche/http2/platform/api/http2_optional.h"
-#include "quiche/http2/platform/api/http2_ptr_util.h"
-#include "quiche/http2/platform/api/http2_reconstruct_object.h"
-#include "quiche/http2/platform/api/http2_string.h"
-#include "quiche/http2/platform/api/http2_string_piece.h"
 #include "quiche/http2/test_tools/http2_random.h"
 
 // Basic tests to validate functioning of the QUICHE http2 platform
@@ -33,11 +28,6 @@
 
 namespace http2 {
 namespace {
-
-TEST(Http2PlatformTest, Http2Arraysize) {
-  int array[] = {0, 1, 2, 3, 4};
-  EXPECT_EQ(5, HTTP2_ARRAYSIZE(array));
-}
 
 TEST(Http2PlatformTest, Http2BugTracker) {
   EXPECT_DEBUG_DEATH(HTTP2_BUG << "Here is a bug,", " bug");
@@ -54,7 +44,7 @@ TEST(Http2PlatformTest, Http2Deque) {
 }
 
 TEST(Http2PlatformTest, Http2EstimateMemoryUsage) {
-  http2::Http2String s = "foo";
+  std::string s = "foo";
   // Stubbed out to always return 0.
   EXPECT_EQ(0, http2::Http2EstimateMemoryUsage(s));
 }
@@ -82,40 +72,9 @@ TEST(Http2PlatformTest, Http2Log) {
   HTTP2_DLOG_EVERY_N(ERROR, 2) << "DLOG_EVERY_N(ERROR, 2)";
 }
 
-TEST(Http2PlatformTest, Http2MakeUnique) {
-  auto p = http2::Http2MakeUnique<int>(4);
-  EXPECT_EQ(4, *p);
-}
-
-TEST(Http2PlatformTest, Http2Optional) {
-  http2::Http2Optional<int> opt;
-  EXPECT_FALSE(opt.has_value());
-  opt = 3;
-  EXPECT_TRUE(opt.has_value());
-}
-
-TEST(Http2PlatformTest, Http2ReconstructObject) {
-  http2::test::Http2Random rng;
-  std::string s;
-
-  http2::test::Http2ReconstructObject(&s, &rng, "123");
-  EXPECT_EQ("123", s);
-
-  http2::test::Http2ReconstructObject(&s, &rng, "456");
-  EXPECT_EQ("456", s);
-
-  http2::test::Http2DefaultReconstructObject(&s, &rng);
-  EXPECT_EQ("", s);
-}
-
-TEST(Http2PlatformTest, Http2String) {
-  http2::Http2String s = "foo";
-  EXPECT_EQ('o', s[1]);
-}
-
 TEST(Http2PlatformTest, Http2StringPiece) {
-  http2::Http2String s = "bar";
-  http2::Http2StringPiece sp(s);
+  std::string s = "bar";
+  quiche::QuicheStringPiece sp(s);
   EXPECT_EQ('b', sp[0]);
 }
 

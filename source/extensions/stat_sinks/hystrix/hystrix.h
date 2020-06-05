@@ -16,8 +16,8 @@ namespace Extensions {
 namespace StatSinks {
 namespace Hystrix {
 
-typedef std::vector<uint64_t> RollingWindow;
-typedef std::map<const std::string, RollingWindow> RollingStatsMap;
+using RollingWindow = std::vector<uint64_t>;
+using RollingStatsMap = std::map<const std::string, RollingWindow>;
 
 using QuantileLatencyMap = std::unordered_map<double, double>;
 static const std::vector<double> hystrix_quantiles = {0,    0.25, 0.5,   0.75, 0.90,
@@ -43,12 +43,12 @@ struct ClusterStatsCache {
   RollingWindow rejected_;
 };
 
-typedef std::unique_ptr<ClusterStatsCache> ClusterStatsCachePtr;
+using ClusterStatsCachePtr = std::unique_ptr<ClusterStatsCache>;
 
 class HystrixSink : public Stats::Sink, public Logger::Loggable<Logger::Id::hystrix> {
 public:
   HystrixSink(Server::Instance& server, uint64_t num_buckets);
-  Http::Code handlerHystrixEventStream(absl::string_view, Http::HeaderMap& response_headers,
+  Http::Code handlerHystrixEventStream(absl::string_view, Http::ResponseHeaderMap& response_headers,
                                        Buffer::Instance&, Server::AdminStream& admin_stream);
   void flush(Stats::MetricSnapshot& snapshot) override;
   void onHistogramComplete(const Stats::Histogram&, uint64_t) override{};
@@ -158,6 +158,8 @@ private:
   std::unordered_map<std::string, ClusterStatsCachePtr> cluster_stats_cache_map_;
 
   // Saved StatNames for fast comparisons in loop.
+  // TODO(mattklein123): Many/all of these stats should just be pulled directly from the cluster
+  // stats directly. This needs some cleanup.
   Stats::StatNamePool stat_name_pool_;
   const Stats::StatName cluster_name_;
   const Stats::StatName cluster_upstream_rq_time_;
@@ -169,7 +171,7 @@ private:
   const Stats::StatName upstream_rq_5xx_;
 };
 
-typedef std::unique_ptr<HystrixSink> HystrixSinkPtr;
+using HystrixSinkPtr = std::unique_ptr<HystrixSink>;
 
 } // namespace Hystrix
 } // namespace StatSinks

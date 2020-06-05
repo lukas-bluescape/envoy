@@ -1,6 +1,7 @@
 #include <memory>
 
-#include "envoy/config/filter/network/thrift_proxy/v2alpha1/thrift_proxy.pb.h"
+#include "envoy/extensions/filters/network/thrift_proxy/v3/thrift_proxy.pb.h"
+#include "envoy/extensions/filters/network/thrift_proxy/v3/thrift_proxy.pb.validate.h"
 
 #include "common/buffer/buffer_impl.h"
 
@@ -11,6 +12,7 @@
 #include "extensions/filters/network/thrift_proxy/framed_transport_impl.h"
 #include "extensions/filters/network/thrift_proxy/header_transport_impl.h"
 
+#include "test/common/stats/stat_test_utility.h"
 #include "test/extensions/filters/network/thrift_proxy/mocks.h"
 #include "test/extensions/filters/network/thrift_proxy/utility.h"
 #include "test/mocks/network/mocks.h"
@@ -28,7 +30,6 @@ using testing::Invoke;
 using testing::NiceMock;
 using testing::Ref;
 using testing::Return;
-using testing::ReturnRef;
 
 namespace Envoy {
 namespace Extensions {
@@ -37,7 +38,7 @@ namespace ThriftProxy {
 
 class TestConfigImpl : public ConfigImpl {
 public:
-  TestConfigImpl(envoy::config::filter::network::thrift_proxy::v2alpha1::ThriftProxy proto_config,
+  TestConfigImpl(envoy::extensions::filters::network::thrift_proxy::v3::ThriftProxy proto_config,
                  Server::Configuration::MockFactoryContext& context,
                  ThriftFilters::DecoderFilterSharedPtr decoder_filter, ThriftFilterStats& stats)
       : ConfigImpl(proto_config, context), decoder_filter_(decoder_filter), stats_(stats) {}
@@ -83,7 +84,7 @@ public:
     // Destroy any existing filter first.
     filter_ = nullptr;
 
-    for (auto counter : store_.counters()) {
+    for (const auto& counter : store_.counters()) {
       counter->reset();
     }
 
@@ -91,12 +92,12 @@ public:
       proto_config_.set_stat_prefix("test");
     } else {
       TestUtility::loadFromYaml(yaml, proto_config_);
-      MessageUtil::validate(proto_config_);
+      TestUtility::validate(proto_config_);
     }
 
     proto_config_.set_stat_prefix("test");
 
-    decoder_filter_.reset(new NiceMock<ThriftFilters::MockDecoderFilter>());
+    decoder_filter_ = std::make_shared<NiceMock<ThriftFilters::MockDecoderFilter>>();
 
     config_ = std::make_unique<TestConfigImpl>(proto_config_, context_, decoder_filter_, stats_);
     if (custom_transport_) {
@@ -294,9 +295,9 @@ public:
 
   NiceMock<Server::Configuration::MockFactoryContext> context_;
   std::shared_ptr<ThriftFilters::MockDecoderFilter> decoder_filter_;
-  Stats::IsolatedStoreImpl store_;
+  Stats::TestUtil::TestStore store_;
   ThriftFilterStats stats_;
-  envoy::config::filter::network::thrift_proxy::v2alpha1::ThriftProxy proto_config_;
+  envoy::extensions::filters::network::thrift_proxy::v3::ThriftProxy proto_config_;
 
   std::unique_ptr<TestConfigImpl> config_;
 
@@ -502,6 +503,17 @@ TEST_F(ThriftConnectionManagerTest, OnDataHandlesTransportApplicationException) 
       .WillOnce(Invoke([&](Buffer::Instance& buffer, bool) -> void {
         EXPECT_EQ(write_buffer_.toString(), buffer.toString());
       }));
+  EXPECT_CALL(filter_callbacks_.connection_, close(Network::ConnectionCloseType::FlushWrite));
+
+  EXPECT_EQ(filter_->onData(buffer_, false), Network::FilterStatus::StopIteration);
+  EXPECT_EQ(1U, store_.counter("test.request_decoding_error").value());
+  EXPECT_EQ(0U, stats_.request_active_.value());
+}
+
+// Tests that OnData handles non-thrift input. Regression test for crash on invalid input.
+TEST_F(ThriftConnectionManagerTest, OnDataHandlesGarbageRequest) {
+  initializeFilter();
+  addRepeated(buffer_, 8, 0);
   EXPECT_CALL(filter_callbacks_.connection_, close(Network::ConnectionCloseType::FlushWrite));
 
   EXPECT_EQ(filter_->onData(buffer_, false), Network::FilterStatus::StopIteration);
@@ -893,6 +905,41 @@ TEST_F(ThriftConnectionManagerTest, RequestAndTransportApplicationException) {
   EXPECT_EQ(0U, store_.counter("test.response_success").value());
   EXPECT_EQ(0U, store_.counter("test.response_error").value());
   EXPECT_EQ(1U, store_.counter("test.response_decoding_error").value());
+}
+
+// Tests that a request is routed and a non-thrift response is handled.
+TEST_F(ThriftConnectionManagerTest, RequestAndGarbageResponse) {
+  initializeFilter();
+  writeFramedBinaryMessage(buffer_, MessageType::Call, 0x0F);
+
+  ThriftFilters::DecoderFilterCallbacks* callbacks{};
+  EXPECT_CALL(*decoder_filter_, setDecoderFilterCallbacks(_))
+      .WillOnce(
+          Invoke([&](ThriftFilters::DecoderFilterCallbacks& cb) -> void { callbacks = &cb; }));
+
+  EXPECT_EQ(filter_->onData(buffer_, false), Network::FilterStatus::StopIteration);
+  EXPECT_EQ(1U, store_.counter("test.request_call").value());
+
+  addRepeated(write_buffer_, 8, 0);
+
+  FramedTransportImpl transport;
+  BinaryProtocolImpl proto;
+  callbacks->startUpstreamResponse(transport, proto);
+
+  EXPECT_CALL(filter_callbacks_.connection_.dispatcher_, deferredDelete_(_)).Times(1);
+  EXPECT_EQ(ThriftFilters::ResponseStatus::Reset, callbacks->upstreamData(write_buffer_));
+
+  filter_callbacks_.connection_.dispatcher_.clearDeferredDeleteList();
+
+  EXPECT_EQ(1U, store_.counter("test.request").value());
+  EXPECT_EQ(1U, store_.counter("test.request_call").value());
+  EXPECT_EQ(0U, stats_.request_active_.value());
+  EXPECT_EQ(0U, store_.counter("test.response").value());
+  EXPECT_EQ(0U, store_.counter("test.response_reply").value());
+  EXPECT_EQ(1U, store_.counter("test.response_exception").value());
+  EXPECT_EQ(0U, store_.counter("test.response_invalid_type").value());
+  EXPECT_EQ(0U, store_.counter("test.response_success").value());
+  EXPECT_EQ(0U, store_.counter("test.response_error").value());
 }
 
 TEST_F(ThriftConnectionManagerTest, PipelinedRequestAndResponse) {
@@ -1290,7 +1337,7 @@ TEST_F(ThriftConnectionManagerTest, DecoderFiltersModifyRequests) {
   EXPECT_EQ(1U, stats_.request_active_.value());
 }
 
-TEST_F(ThriftConnectionManagerTest, transportEndWhenRemoteClose) {
+TEST_F(ThriftConnectionManagerTest, TransportEndWhenRemoteClose) {
   initializeFilter();
   writeComplexFramedBinaryMessage(buffer_, MessageType::Call, 0x0F);
 

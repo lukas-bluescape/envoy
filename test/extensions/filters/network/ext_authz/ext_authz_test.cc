@@ -2,7 +2,8 @@
 #include <string>
 #include <vector>
 
-#include "envoy/config/filter/network/ext_authz/v2/ext_authz.pb.validate.h"
+#include "envoy/extensions/filters/network/ext_authz/v3/ext_authz.pb.h"
+#include "envoy/extensions/filters/network/ext_authz/v3/ext_authz.pb.validate.h"
 #include "envoy/stats/stats.h"
 
 #include "common/buffer/buffer_impl.h"
@@ -26,7 +27,6 @@ using testing::_;
 using testing::InSequence;
 using testing::Invoke;
 using testing::NiceMock;
-using testing::Return;
 using testing::ReturnRef;
 using testing::WithArgs;
 
@@ -48,9 +48,9 @@ public:
     }
     )EOF";
 
-    envoy::config::filter::network::ext_authz::v2::ExtAuthz proto_config{};
+    envoy::extensions::filters::network::ext_authz::v3::ExtAuthz proto_config{};
     TestUtility::loadFromJson(json, proto_config);
-    config_.reset(new Config(proto_config, stats_store_));
+    config_ = std::make_shared<Config>(proto_config, stats_store_);
     client_ = new Filters::Common::ExtAuthz::MockClient();
     filter_ = std::make_unique<Filter>(config_, Filters::Common::ExtAuthz::ClientPtr{client_});
     filter_->initializeReadFilterCallbacks(filter_callbacks_);
@@ -69,13 +69,13 @@ public:
     return response;
   }
 
-  ~ExtAuthzFilterTest() {
+  ~ExtAuthzFilterTest() override {
     for (const Stats::GaugeSharedPtr& gauge : stats_store_.gauges()) {
       EXPECT_EQ(0U, gauge->value());
     }
   }
 
-  Stats::IsolatedStoreImpl stats_store_;
+  Stats::TestUtil::TestStore stats_store_;
   ConfigSharedPtr config_;
   Filters::Common::ExtAuthz::MockClient* client_;
   std::unique_ptr<Filter> filter_;
@@ -92,12 +92,13 @@ TEST_F(ExtAuthzFilterTest, BadExtAuthzConfig) {
   }
   )EOF";
 
-  envoy::config::filter::network::ext_authz::v2::ExtAuthz proto_config{};
+  envoy::extensions::filters::network::ext_authz::v3::ExtAuthz proto_config{};
   TestUtility::loadFromJson(json_string, proto_config);
 
-  EXPECT_THROW(MessageUtil::downcastAndValidate<
-                   const envoy::config::filter::network::ext_authz::v2::ExtAuthz&>(proto_config),
-               ProtoValidationException);
+  EXPECT_THROW(
+      TestUtility::downcastAndValidate<
+          const envoy::extensions::filters::network::ext_authz::v3::ExtAuthz&>(proto_config),
+      ProtoValidationException);
 }
 
 TEST_F(ExtAuthzFilterTest, OKWithOnData) {
@@ -105,7 +106,7 @@ TEST_F(ExtAuthzFilterTest, OKWithOnData) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, testing::A<Tracing::Span&>()))
+  EXPECT_CALL(*client_, check(_, _, testing::A<Tracing::Span&>(), _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -146,7 +147,7 @@ TEST_F(ExtAuthzFilterTest, DeniedWithOnData) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -185,7 +186,7 @@ TEST_F(ExtAuthzFilterTest, FailOpen) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -217,7 +218,7 @@ TEST_F(ExtAuthzFilterTest, FailClose) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -246,7 +247,7 @@ TEST_F(ExtAuthzFilterTest, DoNotCallCancelonRemoteClose) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -279,7 +280,7 @@ TEST_F(ExtAuthzFilterTest, VerifyCancelOnRemoteClose) {
 
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             request_callbacks_ = &callbacks;
@@ -308,7 +309,7 @@ TEST_F(ExtAuthzFilterTest, ImmediateOK) {
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_, continueReading()).Times(0);
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             callbacks.onComplete(makeAuthzResponse(Filters::Common::ExtAuthz::CheckStatus::OK));
@@ -338,7 +339,7 @@ TEST_F(ExtAuthzFilterTest, ImmediateNOK) {
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_, continueReading()).Times(0);
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             callbacks.onComplete(makeAuthzResponse(Filters::Common::ExtAuthz::CheckStatus::Denied));
@@ -364,7 +365,7 @@ TEST_F(ExtAuthzFilterTest, ImmediateErrorFailOpen) {
   EXPECT_CALL(filter_callbacks_.connection_, remoteAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_.connection_, localAddress()).WillOnce(ReturnRef(addr_));
   EXPECT_CALL(filter_callbacks_, continueReading()).Times(0);
-  EXPECT_CALL(*client_, check(_, _, _))
+  EXPECT_CALL(*client_, check(_, _, _, _))
       .WillOnce(
           WithArgs<0>(Invoke([&](Filters::Common::ExtAuthz::RequestCallbacks& callbacks) -> void {
             callbacks.onComplete(makeAuthzResponse(Filters::Common::ExtAuthz::CheckStatus::Error));

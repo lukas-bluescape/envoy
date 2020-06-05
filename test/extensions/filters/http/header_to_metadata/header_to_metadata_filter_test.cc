@@ -1,4 +1,10 @@
+#include <memory>
+
+#include "envoy/extensions/filters/http/header_to_metadata/v3/header_to_metadata.pb.h"
+
+#include "common/common/base64.h"
 #include "common/http/header_map_impl.h"
+#include "common/protobuf/protobuf.h"
 
 #include "extensions/filters/http/header_to_metadata/header_to_metadata_filter.h"
 
@@ -35,10 +41,10 @@ request_rules:
 )EOF";
 
   void initializeFilter(const std::string& yaml) {
-    envoy::config::filter::http::header_to_metadata::v2::Config config;
+    envoy::extensions::filters::http::header_to_metadata::v3::Config config;
     TestUtility::loadFromYaml(yaml, config);
-    config_.reset(new Config(config));
-    filter_.reset(new HeaderToMetadataFilter(config_));
+    config_ = std::make_shared<Config>(config);
+    filter_ = std::make_shared<HeaderToMetadataFilter>(config_);
     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
   }
@@ -68,20 +74,32 @@ MATCHER_P(MapEqNum, rhs, "") {
   return true;
 }
 
+MATCHER_P(MapEqValue, rhs, "") {
+  const ProtobufWkt::Struct& obj = arg;
+  EXPECT_TRUE(!rhs.empty());
+  for (auto const& entry : rhs) {
+    EXPECT_TRUE(TestUtility::protoEqual(obj.fields().at(entry.first), entry.second));
+  }
+  return true;
+}
+
 /**
  * Basic use-case.
  */
 TEST_F(HeaderToMetadataTest, BasicRequestTest) {
   initializeFilter(request_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"X-VERSION", "0xdeadbeef"}};
+  Http::TestRequestHeaderMapImpl incoming_headers{{"X-VERSION", "0xdeadbeef"}};
   std::map<std::string, std::string> expected = {{"version", "0xdeadbeef"}};
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_, setDynamicMetadata("envoy.lb", MapEq(expected)));
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(incoming_headers, false));
+  Http::MetadataMap metadata_map{{"metadata", "metadata"}};
+  EXPECT_EQ(Http::FilterMetadataStatus::Continue, filter_->decodeMetadata(metadata_map));
   Buffer::OwnedImpl data("data");
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->decodeData(data, false));
-  EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(incoming_headers));
+  Http::TestRequestTrailerMapImpl incoming_trailers;
+  EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(incoming_trailers));
   filter_->onDestroy();
 }
 
@@ -90,7 +108,7 @@ TEST_F(HeaderToMetadataTest, BasicRequestTest) {
  */
 TEST_F(HeaderToMetadataTest, DefaultEndpointsTest) {
   initializeFilter(request_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"X-FOO", "bar"}};
+  Http::TestRequestHeaderMapImpl incoming_headers{{"X-FOO", "bar"}};
   std::map<std::string, std::string> expected = {{"default", "true"}};
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
@@ -111,14 +129,14 @@ response_rules:
     remove: true
 )EOF";
   initializeFilter(response_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"x-authenticated", "1"}};
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", "1"}};
   std::map<std::string, std::string> expected = {{"auth", "1"}};
   Http::TestHeaderMapImpl empty_headers;
 
   EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_,
               setDynamicMetadata("envoy.filters.http.header_to_metadata", MapEq(expected)));
-  Http::TestHeaderMapImpl continue_response{{":status", "100"}};
+  Http::TestResponseHeaderMapImpl continue_response{{":status", "100"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue,
             filter_->encode100ContinueHeaders(continue_response));
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
@@ -127,7 +145,8 @@ response_rules:
   EXPECT_EQ(Http::FilterMetadataStatus::Continue, filter_->encodeMetadata(metadata_map));
   Buffer::OwnedImpl data("data");
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->encodeData(data, false));
-  EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->encodeTrailers(incoming_headers));
+  Http::TestResponseTrailerMapImpl incoming_trailers;
+  EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->encodeTrailers(incoming_trailers));
 }
 
 /**
@@ -142,13 +161,117 @@ response_rules:
       type: NUMBER
 )EOF";
   initializeFilter(response_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"x-authenticated", "1"}};
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", "1"}};
   std::map<std::string, int> expected = {{"auth", 1}};
   Http::TestHeaderMapImpl empty_headers;
 
   EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_,
               setDynamicMetadata("envoy.filters.http.header_to_metadata", MapEqNum(expected)));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
+}
+
+/**
+ * Test the Base64 encoded value gets written as a string.
+ */
+TEST_F(HeaderToMetadataTest, StringTypeInBase64UrlTest) {
+  const std::string response_config_yaml = R"EOF(
+response_rules:
+  - header: x-authenticated
+    on_header_present:
+      key: auth
+      type: STRING
+      encode: BASE64
+)EOF";
+  initializeFilter(response_config_yaml);
+  std::string data = "Non-ascii-characters";
+  const auto encoded = Base64::encode(data.c_str(), data.size());
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", encoded}};
+  std::map<std::string, std::string> expected = {{"auth", data}};
+  Http::TestHeaderMapImpl empty_headers;
+
+  EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
+  EXPECT_CALL(req_info_,
+              setDynamicMetadata("envoy.filters.http.header_to_metadata", MapEq(expected)));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
+}
+
+/**
+ * Test the Base64 encoded protobuf value gets written as a protobuf value.
+ */
+TEST_F(HeaderToMetadataTest, ProtobufValueTypeInBase64UrlTest) {
+  const std::string response_config_yaml = R"EOF(
+response_rules:
+  - header: x-authenticated
+    on_header_present:
+      key: auth
+      type: PROTOBUF_VALUE
+      encode: BASE64
+)EOF";
+  initializeFilter(response_config_yaml);
+
+  ProtobufWkt::Value value;
+  auto* s = value.mutable_struct_value();
+
+  ProtobufWkt::Value v;
+  v.set_string_value("blafoo");
+  (*s->mutable_fields())["k1"] = v;
+  v.set_number_value(2019.07);
+  (*s->mutable_fields())["k2"] = v;
+  v.set_bool_value(true);
+  (*s->mutable_fields())["k3"] = v;
+
+  std::string data;
+  ASSERT_TRUE(value.SerializeToString(&data));
+  const auto encoded = Base64::encode(data.c_str(), data.size());
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", encoded}};
+  std::map<std::string, ProtobufWkt::Value> expected = {{"auth", value}};
+
+  EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
+  EXPECT_CALL(req_info_,
+              setDynamicMetadata("envoy.filters.http.header_to_metadata", MapEqValue(expected)));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
+}
+
+/**
+ * Test bad Base64 encoding is not written.
+ */
+TEST_F(HeaderToMetadataTest, ProtobufValueTypeInBadBase64UrlTest) {
+  const std::string response_config_yaml = R"EOF(
+response_rules:
+  - header: x-authenticated
+    on_header_present:
+      key: auth
+      type: PROTOBUF_VALUE
+      encode: BASE64
+)EOF";
+  initializeFilter(response_config_yaml);
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", "invalid"}};
+
+  EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
+  EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
+}
+
+/**
+ * Test the bad protobuf value is not written.
+ */
+TEST_F(HeaderToMetadataTest, BadProtobufValueTypeInBase64UrlTest) {
+  const std::string response_config_yaml = R"EOF(
+response_rules:
+  - header: x-authenticated
+    on_header_present:
+      key: auth
+      type: PROTOBUF_VALUE
+      encode: BASE64
+)EOF";
+  initializeFilter(response_config_yaml);
+  std::string data = "invalid";
+  const auto encoded = Base64::encode(data.c_str(), data.size());
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-authenticated", encoded}};
+
+  EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
+  EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(incoming_headers, false));
 }
 
@@ -165,7 +288,7 @@ request_rules:
       type: STRING
 )EOF";
   initializeFilter(config);
-  Http::TestHeaderMapImpl incoming_headers{};
+  Http::TestRequestHeaderMapImpl incoming_headers;
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);
@@ -190,7 +313,7 @@ request_rules:
       type: STRING
 )EOF";
   initializeFilter(python_yaml);
-  Http::TestHeaderMapImpl incoming_headers{
+  Http::TestRequestHeaderMapImpl incoming_headers{
       {"X-VERSION", "v4.0"},
       {"X-PYTHON-VERSION", "3.7"},
       {"X-IGNORE", "nothing"},
@@ -207,7 +330,7 @@ request_rules:
  */
 TEST_F(HeaderToMetadataTest, EmptyHeaderValue) {
   initializeFilter(request_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"X-VERSION", ""}};
+  Http::TestRequestHeaderMapImpl incoming_headers{{"X-VERSION", ""}};
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);
@@ -219,7 +342,8 @@ TEST_F(HeaderToMetadataTest, EmptyHeaderValue) {
  */
 TEST_F(HeaderToMetadataTest, HeaderValueTooLong) {
   initializeFilter(request_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"X-VERSION", std::string(101, 'x')}};
+  auto length = Envoy::Extensions::HttpFilters::HeaderToMetadataFilter::MAX_HEADER_VALUE_LEN + 1;
+  Http::TestRequestHeaderMapImpl incoming_headers{{"X-VERSION", std::string(length, 'x')}};
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);
@@ -240,7 +364,7 @@ response_rules:
     remove: true
 )EOF";
   initializeFilter(response_config_yaml);
-  Http::TestHeaderMapImpl incoming_headers{{"x-something", "thing"}};
+  Http::TestResponseHeaderMapImpl incoming_headers{{"x-something", "thing"}};
   std::map<std::string, std::string> expected = {{"something", "else"}};
   Http::TestHeaderMapImpl empty_headers;
 
@@ -277,7 +401,7 @@ request_rules:
       type: STRING
 )EOF";
   initializeFilter(config);
-  Http::TestHeaderMapImpl headers{{"x-version", ""}};
+  Http::TestRequestHeaderMapImpl headers{{"x-version", ""}};
 
   EXPECT_CALL(decoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(req_info_));
   EXPECT_CALL(req_info_, setDynamicMetadata(_, _)).Times(0);

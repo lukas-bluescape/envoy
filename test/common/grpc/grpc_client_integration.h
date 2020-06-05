@@ -1,5 +1,7 @@
 #pragma once
 
+#include "envoy/config/core/v3/grpc_service.pb.h"
+
 #include "common/common/assert.h"
 
 #include "test/test_common/utility.h"
@@ -16,11 +18,11 @@ enum class SotwOrDelta { Sotw, Delta };
 
 class BaseGrpcClientIntegrationParamTest {
 public:
-  virtual ~BaseGrpcClientIntegrationParamTest(){};
+  virtual ~BaseGrpcClientIntegrationParamTest() = default;
   virtual Network::Address::IpVersion ipVersion() const PURE;
   virtual ClientType clientType() const PURE;
 
-  void setGrpcService(envoy::api::v2::core::GrpcService& grpc_service,
+  void setGrpcService(envoy::config::core::v3::GrpcService& grpc_service,
                       const std::string& cluster_name,
                       Network::Address::InstanceConstSharedPtr address) {
     switch (clientType()) {
@@ -43,7 +45,6 @@ class GrpcClientIntegrationParamTest
     : public BaseGrpcClientIntegrationParamTest,
       public testing::TestWithParam<std::tuple<Network::Address::IpVersion, ClientType>> {
 public:
-  ~GrpcClientIntegrationParamTest() override = default;
   static std::string protocolTestParamsToString(
       const ::testing::TestParamInfo<std::tuple<Network::Address::IpVersion, ClientType>>& p) {
     return fmt::format("{}_{}",
@@ -55,7 +56,8 @@ public:
 };
 
 class DeltaSotwIntegrationParamTest
-    : public testing::TestWithParam<
+    : public BaseGrpcClientIntegrationParamTest,
+      public testing::TestWithParam<
           std::tuple<Network::Address::IpVersion, ClientType, SotwOrDelta>> {
 public:
   ~DeltaSotwIntegrationParamTest() override = default;
@@ -67,8 +69,8 @@ public:
                        std::get<1>(p.param) == ClientType::GoogleGrpc ? "GoogleGrpc" : "EnvoyGrpc",
                        std::get<2>(p.param) == SotwOrDelta::Delta ? "Delta" : "StateOfTheWorld");
   }
-  Network::Address::IpVersion ipVersion() const { return std::get<0>(GetParam()); }
-  ClientType clientType() const { return std::get<1>(GetParam()); }
+  Network::Address::IpVersion ipVersion() const override { return std::get<0>(GetParam()); }
+  ClientType clientType() const override { return std::get<1>(GetParam()); }
   SotwOrDelta sotwOrDelta() const { return std::get<2>(GetParam()); }
 };
 
@@ -88,7 +90,7 @@ public:
 #define GRPC_CLIENT_INTEGRATION_PARAMS                                                             \
   testing::Combine(testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),                     \
                    testing::Values(Grpc::ClientType::EnvoyGrpc, Grpc::ClientType::GoogleGrpc))
-#define DELTA_INTEGRATION_PARAMS                                                                   \
+#define DELTA_SOTW_GRPC_CLIENT_INTEGRATION_PARAMS                                                  \
   testing::Combine(testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),                     \
                    testing::Values(Grpc::ClientType::EnvoyGrpc, Grpc::ClientType::GoogleGrpc),     \
                    testing::Values(Grpc::SotwOrDelta::Sotw, Grpc::SotwOrDelta::Delta))
@@ -96,7 +98,7 @@ public:
 #define GRPC_CLIENT_INTEGRATION_PARAMS                                                             \
   testing::Combine(testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),                     \
                    testing::Values(Grpc::ClientType::EnvoyGrpc))
-#define DELTA_INTEGRATION_PARAMS                                                                   \
+#define DELTA_SOTW_GRPC_CLIENT_INTEGRATION_PARAMS                                                  \
   testing::Combine(testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),                     \
                    testing::Values(Grpc::ClientType::EnvoyGrpc),                                   \
                    testing::Values(Grpc::SotwOrDelta::Sotw, Grpc::SotwOrDelta::Delta))

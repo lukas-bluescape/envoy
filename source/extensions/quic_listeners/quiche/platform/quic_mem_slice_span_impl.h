@@ -8,17 +8,16 @@
 
 #include "envoy/buffer/buffer.h"
 
-#include "common/common/stack_array.h"
-
+#include "absl/container/fixed_array.h"
+#include "quiche/common/platform/api/quiche_string_piece.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_mem_slice.h"
-#include "quiche/quic/platform/api/quic_string_piece.h"
 
 namespace quic {
 
 // Implements the interface required by
 // https://quiche.googlesource.com/quiche/+/refs/heads/master/quic/platform/api/quic_mem_slice_span.h
-// Wraps a Buffer::Instance and deliver its data with mininum number of copies.
+// Wraps a Buffer::Instance and deliver its data with minimum number of copies.
 class QuicMemSliceSpanImpl {
 public:
   QuicMemSliceSpanImpl() : buffer_(nullptr) {}
@@ -26,6 +25,7 @@ public:
    * @param buffer has to outlive the life time of this class.
    */
   explicit QuicMemSliceSpanImpl(Envoy::Buffer::Instance& buffer) : buffer_(&buffer) {}
+  explicit QuicMemSliceSpanImpl(QuicMemSliceImpl* slice) : buffer_(&slice->single_slice_buffer()) {}
 
   QuicMemSliceSpanImpl(const QuicMemSliceSpanImpl& other) = default;
   QuicMemSliceSpanImpl& operator=(const QuicMemSliceSpanImpl& other) = default;
@@ -43,9 +43,9 @@ public:
   }
 
   // QuicMemSliceSpan
-  QuicStringPiece GetData(size_t index);
+  quiche::QuicheStringPiece GetData(size_t index);
   QuicByteCount total_length() { return buffer_->length(); };
-  size_t NumSlices() { return buffer_->getRawSlices(nullptr, 0); }
+  size_t NumSlices() { return buffer_->getRawSlices().size(); }
   template <typename ConsumeFunction> QuicByteCount ConsumeAll(ConsumeFunction consume);
   bool empty() const { return buffer_->length() == 0; }
 
@@ -55,11 +55,8 @@ private:
 
 template <typename ConsumeFunction>
 QuicByteCount QuicMemSliceSpanImpl::ConsumeAll(ConsumeFunction consume) {
-  uint64_t num_slices = buffer_->getRawSlices(nullptr, 0);
-  Envoy::STACK_ARRAY(slices, Envoy::Buffer::RawSlice, num_slices);
-  buffer_->getRawSlices(slices.begin(), num_slices);
   size_t saved_length = 0;
-  for (auto& slice : slices) {
+  for (auto& slice : buffer_->getRawSlices()) {
     if (slice.len_ == 0) {
       continue;
     }

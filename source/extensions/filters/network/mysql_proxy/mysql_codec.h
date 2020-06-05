@@ -93,8 +93,8 @@ constexpr char MYSQL_STR_END = '\0';
 class MySQLCodec : public Logger::Loggable<Logger::Id::filter> {
 public:
   enum class PktType {
-    MYSQL_REQUEST = 0,
-    MYSQL_RESPONSE = 1,
+    MysqlRequest = 0,
+    MysqlResponse = 1,
   };
 
   PACKED_STRUCT(struct header_fields {
@@ -107,7 +107,7 @@ public:
     uint32_t bits_;
   };
 
-  virtual ~MySQLCodec() {}
+  virtual ~MySQLCodec() = default;
 
   int decode(Buffer::Instance& data, uint8_t seq, uint32_t len) {
     seq_ = seq;

@@ -34,8 +34,8 @@ CodeStatsImpl::CodeStatsImpl(Stats::SymbolTable& symbol_table)
       vcluster_(stat_name_pool_.add("vcluster")), vhost_(stat_name_pool_.add("vhost")),
       zone_(stat_name_pool_.add("zone")) {
 
-  for (uint32_t i = 0; i < NumHttpCodes; ++i) {
-    rc_stat_names_[i] = nullptr;
+  for (auto& rc_stat_name : rc_stat_names_) {
+    rc_stat_name = nullptr;
   }
 
   // Pre-allocate response codes 200, 404, and 503, as those seem quite likely.
@@ -47,8 +47,7 @@ CodeStatsImpl::CodeStatsImpl(Stats::SymbolTable& symbol_table)
   upstreamRqStatName(Code::ServiceUnavailable);
 }
 
-void CodeStatsImpl::incCounter(Stats::Scope& scope,
-                               const std::vector<Stats::StatName>& names) const {
+void CodeStatsImpl::incCounter(Stats::Scope& scope, const Stats::StatNameVec& names) const {
   const Stats::SymbolTable::StoragePtr stat_name_storage = symbol_table_.join(names);
   scope.counterFromStatName(Stats::StatName(stat_name_storage.get())).inc();
 }
@@ -58,10 +57,10 @@ void CodeStatsImpl::incCounter(Stats::Scope& scope, Stats::StatName a, Stats::St
   scope.counterFromStatName(Stats::StatName(stat_name_storage.get())).inc();
 }
 
-void CodeStatsImpl::recordHistogram(Stats::Scope& scope, const std::vector<Stats::StatName>& names,
-                                    uint64_t count) const {
+void CodeStatsImpl::recordHistogram(Stats::Scope& scope, const Stats::StatNameVec& names,
+                                    Stats::Histogram::Unit unit, uint64_t count) const {
   const Stats::SymbolTable::StoragePtr stat_name_storage = symbol_table_.join(names);
-  scope.histogramFromStatName(Stats::StatName(stat_name_storage.get())).recordValue(count);
+  scope.histogramFromStatName(Stats::StatName(stat_name_storage.get()), unit).recordValue(count);
 }
 
 void CodeStatsImpl::chargeBasicResponseStat(Stats::Scope& scope, Stats::StatName prefix,
@@ -129,37 +128,34 @@ void CodeStatsImpl::writeCategory(const ResponseStatInfo& info, Stats::StatName 
 
 void CodeStatsImpl::chargeResponseTiming(const ResponseTimingInfo& info) const {
   const uint64_t count = info.response_time_.count();
-  recordHistogram(info.cluster_scope_, {info.prefix_, upstream_rq_time_}, count);
+  recordHistogram(info.cluster_scope_, {info.prefix_, upstream_rq_time_},
+                  Stats::Histogram::Unit::Milliseconds, count);
   if (info.upstream_canary_) {
-    recordHistogram(info.cluster_scope_, {info.prefix_, canary_, upstream_rq_time_}, count);
+    recordHistogram(info.cluster_scope_, {info.prefix_, canary_, upstream_rq_time_},
+                    Stats::Histogram::Unit::Milliseconds, count);
   }
 
   if (info.internal_request_) {
-    recordHistogram(info.cluster_scope_, {info.prefix_, internal_, upstream_rq_time_}, count);
+    recordHistogram(info.cluster_scope_, {info.prefix_, internal_, upstream_rq_time_},
+                    Stats::Histogram::Unit::Milliseconds, count);
   } else {
-    recordHistogram(info.cluster_scope_, {info.prefix_, external_, upstream_rq_time_}, count);
+    recordHistogram(info.cluster_scope_, {info.prefix_, external_, upstream_rq_time_},
+                    Stats::Histogram::Unit::Milliseconds, count);
   }
 
   if (!info.request_vcluster_name_.empty()) {
     recordHistogram(info.global_scope_,
                     {vhost_, info.request_vhost_name_, vcluster_, info.request_vcluster_name_,
                      upstream_rq_time_},
-                    count);
+                    Stats::Histogram::Unit::Milliseconds, count);
   }
 
   // Handle per zone stats.
   if (!info.from_zone_.empty() && !info.to_zone_.empty()) {
     recordHistogram(info.cluster_scope_,
                     {info.prefix_, zone_, info.from_zone_, info.to_zone_, upstream_rq_time_},
-                    count);
+                    Stats::Histogram::Unit::Milliseconds, count);
   }
-}
-
-absl::string_view CodeStatsImpl::stripTrailingDot(absl::string_view str) {
-  if (absl::EndsWith(str, ".")) {
-    str.remove_suffix(1);
-  }
-  return str;
 }
 
 Stats::StatName CodeStatsImpl::upstreamRqGroup(Code response_code) const {
@@ -184,7 +180,7 @@ Stats::StatName CodeStatsImpl::upstreamRqStatName(Code response_code) const {
   if (rc_index >= NumHttpCodes) {
     return upstream_rq_unknown_;
   }
-  std::atomic<uint8_t*>& atomic_ref = rc_stat_names_[rc_index];
+  std::atomic<const uint8_t*>& atomic_ref = rc_stat_names_[rc_index];
   if (atomic_ref.load() == nullptr) {
     absl::MutexLock lock(&mutex_);
 

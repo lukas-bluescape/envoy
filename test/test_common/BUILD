@@ -23,7 +23,10 @@ envoy_cc_test_library(
     name = "environment_lib",
     srcs = ["environment.cc"],
     hdrs = ["environment.h"],
-    external_deps = ["abseil_optional"],
+    external_deps = [
+        "abseil_optional",
+        "bazel_runfiles",
+    ],
     deps = [
         ":network_utility_lib",
         "//include/envoy/server:options_interface",
@@ -31,6 +34,7 @@ envoy_cc_test_library(
         "//source/common/common:compiler_requirements_lib",
         "//source/common/common:macros",
         "//source/common/common:utility_lib",
+        "//source/common/filesystem:filesystem_lib",
         "//source/common/json:json_loader_lib",
         "//source/common/network:utility_lib",
         "//source/server:options_lib",
@@ -102,6 +106,7 @@ envoy_cc_test_library(
         "//source/common/common:thread_lib",
         "//source/common/common:utility_lib",
         "//source/common/config:resources_lib",
+        "//source/common/config:version_converter_lib",
         "//source/common/filesystem:directory_lib",
         "//source/common/filesystem:filesystem_lib",
         "//source/common/http:header_map_lib",
@@ -112,7 +117,29 @@ envoy_cc_test_library(
         "//source/common/stats:fake_symbol_table_lib",
         "//source/common/stats:stats_lib",
         "//test/mocks/stats:stats_mocks",
-        "@envoy_api//envoy/config/bootstrap/v2:bootstrap_cc",
+        "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/runtime/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/matcher/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "test_runtime_lib",
+    hdrs = ["test_runtime.h"],
+    deps = [
+        "//source/common/runtime:runtime_lib",
+        "//source/common/stats:isolated_store_lib",
+        "//test/mocks/event:event_mocks",
+        "//test/mocks/init:init_mocks",
+        "//test/mocks/local_info:local_info_mocks",
+        "//test/mocks/protobuf:protobuf_mocks",
+        "//test/mocks/runtime:runtime_mocks",
+        "//test/mocks/thread_local:thread_local_mocks",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
     ],
 )
 
@@ -141,6 +168,7 @@ envoy_cc_test(
     srcs = ["utility_test.cc"],
     deps = [
         ":utility_lib",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
 
@@ -230,6 +258,7 @@ envoy_cc_test(
         ":simulated_time_system_lib",
         ":utility_lib",
         "//source/common/event:libevent_scheduler_lib",
+        "//test/mocks/event:event_mocks",
     ],
 )
 

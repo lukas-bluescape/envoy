@@ -1,5 +1,6 @@
 #pragma once
 
+#include "envoy/config/core/v3/base.pb.h"
 #include "envoy/network/address.h"
 #include "envoy/network/listen_socket.h"
 
@@ -18,14 +19,14 @@ public:
    * Constructs a socket option which will set the socket to use source @c src_address
    */
   OriginalSrcSocketOption(Network::Address::InstanceConstSharedPtr src_address);
-  ~OriginalSrcSocketOption() {}
+  ~OriginalSrcSocketOption() override = default;
 
   /**
    * Updates the source address of the socket to match `src_address_`.
    * Adds socket options to the socket to allow this to work.
    */
   bool setOption(Network::Socket& socket,
-                 envoy::api::v2::core::SocketOption::SocketState state) const override;
+                 envoy::config::core::v3::SocketOption::SocketState state) const override;
 
   /**
    * Appends a key which uniquely identifies the address being tracked.
@@ -34,7 +35,7 @@ public:
 
   absl::optional<Details>
   getOptionDetails(const Network::Socket& socket,
-                   envoy::api::v2::core::SocketOption::SocketState state) const override;
+                   envoy::config::core::v3::SocketOption::SocketState state) const override;
 
 private:
   Network::Address::InstanceConstSharedPtr src_address_;

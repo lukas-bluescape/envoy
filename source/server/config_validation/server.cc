@@ -2,8 +2,7 @@
 
 #include <memory>
 
-#include "envoy/config/bootstrap/v2/bootstrap.pb.h"
-#include "envoy/config/bootstrap/v2/bootstrap.pb.validate.h"
+#include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 
 #include "common/common/utility.h"
 #include "common/common/version.h"
@@ -13,10 +12,13 @@
 #include "common/protobuf/utility.h"
 #include "common/singleton/manager_impl.h"
 
+#include "server/ssl_context_manager.h"
+
 namespace Envoy {
 namespace Server {
 
-bool validateConfig(const Options& options, Network::Address::InstanceConstSharedPtr local_address,
+bool validateConfig(const Options& options,
+                    const Network::Address::InstanceConstSharedPtr& local_address,
                     ComponentFactory& component_factory, Thread::ThreadFactory& thread_factory,
                     Filesystem::Instance& file_system) {
   Thread::MutexBasicLockable access_log_lock;
@@ -34,21 +36,22 @@ bool validateConfig(const Options& options, Network::Address::InstanceConstShare
   }
 }
 
-ValidationInstance::ValidationInstance(const Options& options, Event::TimeSystem& time_system,
-                                       Network::Address::InstanceConstSharedPtr local_address,
-                                       Stats::IsolatedStoreImpl& store,
-                                       Thread::BasicLockable& access_log_lock,
-                                       ComponentFactory& component_factory,
-                                       Thread::ThreadFactory& thread_factory,
-                                       Filesystem::Instance& file_system)
-    : options_(options), stats_store_(store),
+ValidationInstance::ValidationInstance(
+    const Options& options, Event::TimeSystem& time_system,
+    const Network::Address::InstanceConstSharedPtr& local_address, Stats::IsolatedStoreImpl& store,
+    Thread::BasicLockable& access_log_lock, ComponentFactory& component_factory,
+    Thread::ThreadFactory& thread_factory, Filesystem::Instance& file_system)
+    : options_(options), validation_context_(options_.allowUnknownStaticFields(),
+                                             !options.rejectUnknownDynamicFields()),
+      stats_store_(store),
       api_(new Api::ValidationImpl(thread_factory, store, time_system, file_system)),
       dispatcher_(api_->allocateDispatcher()),
-      singleton_manager_(new Singleton::ManagerImpl(api_->threadFactory().currentThreadId())),
+      singleton_manager_(new Singleton::ManagerImpl(api_->threadFactory())),
       access_log_manager_(options.fileFlushIntervalMsec(), *api_, *dispatcher_, access_log_lock,
                           store),
       mutex_tracer_(nullptr), grpc_context_(stats_store_.symbolTable()),
-      http_context_(stats_store_.symbolTable()), time_system_(time_system) {
+      http_context_(stats_store_.symbolTable()), time_system_(time_system),
+      server_contexts_(*this) {
   try {
     initialize(options, local_address, component_factory);
   } catch (const EnvoyException& e) {
@@ -60,7 +63,7 @@ ValidationInstance::ValidationInstance(const Options& options, Event::TimeSystem
 }
 
 void ValidationInstance::initialize(const Options& options,
-                                    Network::Address::InstanceConstSharedPtr local_address,
+                                    const Network::Address::InstanceConstSharedPtr& local_address,
                                     ComponentFactory& component_factory) {
   // See comments on InstanceImpl::initialize() for the overall flow here.
   //
@@ -72,33 +75,33 @@ void ValidationInstance::initialize(const Options& options,
   // If we get all the way through that stripped-down initialization flow, to the point where we'd
   // be ready to serve, then the config has passed validation.
   // Handle configuration that needs to take place prior to the main configuration load.
-  envoy::config::bootstrap::v2::Bootstrap bootstrap;
-  InstanceUtil::loadBootstrapConfig(bootstrap, options, messageValidationVisitor(), *api_);
+  envoy::config::bootstrap::v3::Bootstrap bootstrap;
+  InstanceUtil::loadBootstrapConfig(bootstrap, options,
+                                    messageValidationContext().staticValidationVisitor(), *api_);
 
   Config::Utility::createTagProducer(bootstrap);
 
-  bootstrap.mutable_node()->set_build_version(VersionInfo::version());
+  bootstrap.mutable_node()->set_hidden_envoy_deprecated_build_version(VersionInfo::version());
 
   local_info_ = std::make_unique<LocalInfo::LocalInfoImpl>(
       bootstrap.node(), local_address, options.serviceZone(), options.serviceClusterName(),
       options.serviceNodeName());
 
   Configuration::InitialImpl initial_config(bootstrap);
-  overload_manager_ = std::make_unique<OverloadManagerImpl>(dispatcher(), stats(), threadLocal(),
-                                                            bootstrap.overload_manager(),
-                                                            messageValidationVisitor(), *api_);
+  overload_manager_ = std::make_unique<OverloadManagerImpl>(
+      dispatcher(), stats(), threadLocal(), bootstrap.overload_manager(),
+      messageValidationContext().staticValidationVisitor(), *api_);
   listener_manager_ = std::make_unique<ListenerManagerImpl>(*this, *this, *this, false);
   thread_local_.registerThread(*dispatcher_, true);
   runtime_loader_ = component_factory.createRuntime(*this, initial_config);
-  secret_manager_ = std::make_unique<Secret::SecretManagerImpl>();
-  ssl_context_manager_ =
-      std::make_unique<Extensions::TransportSockets::Tls::ContextManagerImpl>(api_->timeSource());
+  secret_manager_ = std::make_unique<Secret::SecretManagerImpl>(admin().getConfigTracker());
+  ssl_context_manager_ = createContextManager("ssl_context_manager", api_->timeSource());
   cluster_manager_factory_ = std::make_unique<Upstream::ValidationClusterManagerFactory>(
       admin(), runtime(), stats(), threadLocal(), random(), dnsResolver(), sslContextManager(),
-      dispatcher(), localInfo(), *secret_manager_, messageValidationVisitor(), *api_, http_context_,
-      accessLogManager(), singletonManager(), time_system_);
+      dispatcher(), localInfo(), *secret_manager_, messageValidationContext(), *api_, http_context_,
+      grpc_context_, accessLogManager(), singletonManager(), time_system_);
   config_.initialize(bootstrap, *this, *cluster_manager_factory_);
-  http_context_.setTracer(config_.httpTracer());
+  runtime_loader_->initialize(clusterManager());
   clusterManager().setInitializedCb([this]() -> void { init_manager_.initialize(init_watcher_); });
 }
 

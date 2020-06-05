@@ -14,8 +14,14 @@ public:
   ~FileImplWin32();
 
 protected:
+  struct FlagsAndMode {
+    int flags_ = 0;
+    int pmode_ = 0;
+  };
+
   // Filesystem::FileSharedImpl
-  void openFile() override;
+  FlagsAndMode translateFlag(FlagSet in);
+  void openFile(FlagSet in) override;
   ssize_t writeFile(absl::string_view buffer) override;
   bool closeFile() override;
 
@@ -31,6 +37,7 @@ public:
   bool directoryExists(const std::string& path) override;
   ssize_t fileSize(const std::string& path) override;
   std::string fileReadToEnd(const std::string& path) override;
+  PathSplitResult splitPathFromFilename(absl::string_view path) override;
   bool illegalPath(const std::string& path) override;
 };
 

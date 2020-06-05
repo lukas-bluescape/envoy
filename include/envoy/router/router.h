@@ -9,12 +9,15 @@
 #include <string>
 
 #include "envoy/access_log/access_log.h"
-#include "envoy/api/v2/core/base.pb.h"
+#include "envoy/common/matchers.h"
+#include "envoy/config/core/v3/base.pb.h"
 #include "envoy/config/typed_metadata.h"
 #include "envoy/http/codec.h"
 #include "envoy/http/codes.h"
+#include "envoy/http/hash_policy.h"
 #include "envoy/http/header_map.h"
 #include "envoy/tracing/http_tracer.h"
+#include "envoy/type/v3/percent.pb.h"
 #include "envoy/upstream/resource_manager.h"
 #include "envoy/upstream/retry.h"
 
@@ -36,7 +39,7 @@ namespace Router {
  */
 class ResponseEntry {
 public:
-  virtual ~ResponseEntry() {}
+  virtual ~ResponseEntry() = default;
 
   /**
    * Do potentially destructive header transforms on response headers prior to forwarding. For
@@ -45,7 +48,7 @@ public:
    * @param headers supplies the response headers, which may be modified during this call.
    * @param stream_info holds additional information about the request.
    */
-  virtual void finalizeResponseHeaders(Http::HeaderMap& headers,
+  virtual void finalizeResponseHeaders(Http::ResponseHeaderMap& headers,
                                        const StreamInfo::StreamInfo& stream_info) const PURE;
 };
 
@@ -54,7 +57,7 @@ public:
  */
 class DirectResponseEntry : public ResponseEntry {
 public:
-  virtual ~DirectResponseEntry() {}
+  ~DirectResponseEntry() override = default;
 
   /**
    * Returns the HTTP status code to return.
@@ -68,7 +71,7 @@ public:
    * @return std::string the redirect URL if this DirectResponseEntry is a redirect,
    *         or an empty string otherwise.
    */
-  virtual std::string newPath(const Http::HeaderMap& headers) const PURE;
+  virtual std::string newPath(const Http::RequestHeaderMap& headers) const PURE;
 
   /**
    * Returns the response body to send with direct responses.
@@ -84,7 +87,7 @@ public:
    * @param headers supplies the request headers, which may be modified during this call.
    * @param insert_envoy_original_path insert x-envoy-original-path header?
    */
-  virtual void rewritePathHeader(Http::HeaderMap& headers,
+  virtual void rewritePathHeader(Http::RequestHeaderMap& headers,
                                  bool insert_envoy_original_path) const PURE;
 
   /**
@@ -98,17 +101,12 @@ public:
  */
 class CorsPolicy {
 public:
-  virtual ~CorsPolicy() {}
+  virtual ~CorsPolicy() = default;
 
   /**
-   * @return std::list<std::string>& access-control-allow-origin values.
+   * @return std::vector<StringMatcherPtr>& access-control-allow-origin matchers.
    */
-  virtual const std::list<std::string>& allowOrigins() const PURE;
-
-  /*
-   * @return std::list<std::regex>& regexes that match allowed origins.
-   */
-  virtual const std::list<std::regex>& allowOriginRegexes() const PURE;
+  virtual const std::vector<Matchers::StringMatcherPtr>& allowOrigins() const PURE;
 
   /**
    * @return std::string access-control-allow-methods value.
@@ -163,9 +161,11 @@ public:
   static const uint32_t RETRY_ON_GRPC_UNAVAILABLE        = 0x100;
   static const uint32_t RETRY_ON_GRPC_INTERNAL           = 0x200;
   static const uint32_t RETRY_ON_RETRIABLE_STATUS_CODES  = 0x400;
+  static const uint32_t RETRY_ON_RESET                   = 0x800;
+  static const uint32_t RETRY_ON_RETRIABLE_HEADERS       = 0x1000;
   // clang-format on
 
-  virtual ~RetryPolicy() {}
+  virtual ~RetryPolicy() = default;
 
   /**
    * @return std::chrono::milliseconds timeout per retry attempt.
@@ -208,6 +208,18 @@ public:
   virtual const std::vector<uint32_t>& retriableStatusCodes() const PURE;
 
   /**
+   * @return std::vector<Http::HeaderMatcherSharedPtr>& list of response header matchers that
+   * will be checked when the 'retriable-headers' retry policy is enabled.
+   */
+  virtual const std::vector<Http::HeaderMatcherSharedPtr>& retriableHeaders() const PURE;
+
+  /**
+   * @return std::vector<Http::HeaderMatcherSharedPt>& list of request header
+   * matchers that will be checked before enabling retries.
+   */
+  virtual const std::vector<Http::HeaderMatcherSharedPtr>& retriableRequestHeaders() const PURE;
+
+  /**
    * @return absl::optional<std::chrono::milliseconds> base retry interval
    */
   virtual absl::optional<std::chrono::milliseconds> baseInterval() const PURE;
@@ -233,9 +245,9 @@ enum class InternalRedirectAction { PassThrough, Handle };
  */
 class RetryState {
 public:
-  typedef std::function<void()> DoRetryCallback;
+  using DoRetryCallback = std::function<void()>;
 
-  virtual ~RetryState() {}
+  virtual ~RetryState() = default;
 
   /**
    * @return true if a policy is in place for the active request that allows retries.
@@ -252,7 +264,7 @@ public:
    *         in the future. Otherwise a retry should not take place and the callback will never be
    *         called. Calling code should proceed with error handling.
    */
-  virtual RetryStatus shouldRetryHeaders(const Http::HeaderMap& response_headers,
+  virtual RetryStatus shouldRetryHeaders(const Http::ResponseHeaderMap& response_headers,
                                          DoRetryCallback callback) PURE;
 
   /**
@@ -263,7 +275,7 @@ public:
    * @param response_headers supplies the response headers.
    * @return bool true if a retry would be warranted based on the retry policy.
    */
-  virtual bool wouldRetryFromHeaders(const Http::HeaderMap& response_headers) PURE;
+  virtual bool wouldRetryFromHeaders(const Http::ResponseHeaderMap& response_headers) PURE;
 
   /**
    * Determine whether a request should be retried after a reset based on the reason for the reset.
@@ -321,14 +333,14 @@ public:
   virtual uint32_t hostSelectionMaxAttempts() const PURE;
 };
 
-typedef std::unique_ptr<RetryState> RetryStatePtr;
+using RetryStatePtr = std::unique_ptr<RetryState>;
 
 /**
  * Per route policy for request shadowing.
  */
 class ShadowPolicy {
 public:
-  virtual ~ShadowPolicy() {}
+  virtual ~ShadowPolicy() = default;
 
   /**
    * @return the name of the cluster that a matching request should be shadowed to. Returns empty
@@ -348,7 +360,32 @@ public:
    * @return the default fraction of traffic the should be shadowed, if the runtime key is not
    *         present.
    */
-  virtual const envoy::type::FractionalPercent& defaultValue() const PURE;
+  virtual const envoy::type::v3::FractionalPercent& defaultValue() const PURE;
+
+  /**
+   * @return true if the trace span should be sampled.
+   */
+  virtual bool traceSampled() const PURE;
+};
+
+using ShadowPolicyPtr = std::unique_ptr<ShadowPolicy>;
+
+/**
+ * All virtual cluster stats. @see stats_macro.h
+ */
+#define ALL_VIRTUAL_CLUSTER_STATS(COUNTER)                                                         \
+  COUNTER(upstream_rq_retry)                                                                       \
+  COUNTER(upstream_rq_retry_limit_exceeded)                                                        \
+  COUNTER(upstream_rq_retry_overflow)                                                              \
+  COUNTER(upstream_rq_retry_success)                                                               \
+  COUNTER(upstream_rq_timeout)                                                                     \
+  COUNTER(upstream_rq_total)
+
+/**
+ * Struct definition for all virtual cluster stats. @see stats_macro.h
+ */
+struct VirtualClusterStats {
+  ALL_VIRTUAL_CLUSTER_STATS(GENERATE_COUNTER_STRUCT)
 };
 
 /**
@@ -357,12 +394,21 @@ public:
  */
 class VirtualCluster {
 public:
-  virtual ~VirtualCluster() {}
+  virtual ~VirtualCluster() = default;
 
   /**
    * @return the stat-name of the virtual cluster.
    */
   virtual Stats::StatName statName() const PURE;
+
+  /**
+   * @return VirtualClusterStats& strongly named stats for this virtual cluster.
+   */
+  virtual VirtualClusterStats& stats() const PURE;
+
+  static VirtualClusterStats generateStats(Stats::Scope& scope) {
+    return {ALL_VIRTUAL_CLUSTER_STATS(POOL_COUNTER(scope))};
+  }
 };
 
 class RateLimitPolicy;
@@ -375,16 +421,16 @@ class Config;
  */
 class RouteSpecificFilterConfig {
 public:
-  virtual ~RouteSpecificFilterConfig() {}
+  virtual ~RouteSpecificFilterConfig() = default;
 };
-typedef std::shared_ptr<const RouteSpecificFilterConfig> RouteSpecificFilterConfigConstSharedPtr;
+using RouteSpecificFilterConfigConstSharedPtr = std::shared_ptr<const RouteSpecificFilterConfig>;
 
 /**
  * Virtual host definition.
  */
 class VirtualHost {
 public:
-  virtual ~VirtualHost() {}
+  virtual ~VirtualHost() = default;
 
   /**
    * @return const CorsPolicy* the CORS policy for this virtual host.
@@ -424,40 +470,22 @@ public:
   /**
    * @return bool whether to include the request count header in upstream requests.
    */
-  virtual bool includeAttemptCount() const PURE;
-};
-
-/**
- * Route hash policy. I.e., if using a hashing load balancer, how the route should be hashed onto
- * an upstream host.
- */
-class HashPolicy {
-public:
-  virtual ~HashPolicy() {}
+  virtual bool includeAttemptCountInRequest() const PURE;
 
   /**
-   * A callback used for requesting that a cookie be set with the given lifetime.
-   * @param key the name of the cookie to be set
-   * @param path the path of the cookie, or the empty string if no path should be set.
-   * @param ttl the lifetime of the cookie
-   * @return std::string the opaque value of the cookie that will be set
+   * @return bool whether to include the request count header in the downstream response.
    */
-  typedef std::function<std::string(const std::string& key, const std::string& path,
-                                    std::chrono::seconds ttl)>
-      AddCookieCallback;
+  virtual bool includeAttemptCountInResponse() const PURE;
 
   /**
-   * @param downstream_address is the address of the connected client host, or nullptr if the
-   * request is initiated from within this host
-   * @param headers stores the HTTP headers for the stream
-   * @param add_cookie is called to add a set-cookie header on the reply sent to the downstream
-   * host
-   * @return absl::optional<uint64_t> an optional hash value to route on. A hash value might not be
-   * returned if for example the specified HTTP header does not exist.
+   * @return uint32_t any route cap on bytes which should be buffered for shadowing or retries.
+   *         This is an upper bound so does not necessarily reflect the bytes which will be buffered
+   *         as other limits may apply.
+   *         If a per route limit exists, it takes precedence over this configuration.
+   *         Unlike some other buffer limits, 0 here indicates buffering should not be performed
+   *         rather than no limit applies.
    */
-  virtual absl::optional<uint64_t>
-  generateHash(const Network::Address::Instance* downstream_address, const Http::HeaderMap& headers,
-               AddCookieCallback add_cookie) const PURE;
+  virtual uint32_t retryShadowBufferLimit() const PURE;
 };
 
 /**
@@ -465,7 +493,7 @@ public:
  */
 class HedgePolicy {
 public:
-  virtual ~HedgePolicy() {}
+  virtual ~HedgePolicy() = default;
 
   /**
    * @return number of upstream requests that should be sent initially.
@@ -476,7 +504,7 @@ public:
    * @return percent chance that an additional upstream request should be sent
    * on top of the value from initialRequests().
    */
-  virtual const envoy::type::FractionalPercent& additionalRequestChance() const PURE;
+  virtual const envoy::type::v3::FractionalPercent& additionalRequestChance() const PURE;
 
   /**
    * @return bool indicating whether request hedging should occur when a request
@@ -488,7 +516,7 @@ public:
 
 class MetadataMatchCriterion {
 public:
-  virtual ~MetadataMatchCriterion() {}
+  virtual ~MetadataMatchCriterion() = default;
 
   /*
    * @return const std::string& the name of the metadata key
@@ -501,14 +529,14 @@ public:
   virtual const HashedValue& value() const PURE;
 };
 
-typedef std::shared_ptr<const MetadataMatchCriterion> MetadataMatchCriterionConstSharedPtr;
+using MetadataMatchCriterionConstSharedPtr = std::shared_ptr<const MetadataMatchCriterion>;
 
 class MetadataMatchCriteria;
-typedef std::unique_ptr<const MetadataMatchCriteria> MetadataMatchCriteriaConstPtr;
+using MetadataMatchCriteriaConstPtr = std::unique_ptr<const MetadataMatchCriteria>;
 
 class MetadataMatchCriteria {
 public:
-  virtual ~MetadataMatchCriteria() {}
+  virtual ~MetadataMatchCriteria() = default;
 
   /*
    * @return std::vector<MetadataMatchCriterionConstSharedPtr>& a vector of
@@ -528,7 +556,37 @@ public:
    */
   virtual MetadataMatchCriteriaConstPtr
   mergeMatchCriteria(const ProtobufWkt::Struct& metadata_matches) const PURE;
+
+  /**
+   * Creates a new MetadataMatchCriteria with criteria vector reduced to given names
+   * @param names names of metadata keys to preserve
+   * @return MetadataMatchCriteriaConstPtr the result criteria. Returns nullptr if the result
+   * criteria are empty.
+   */
+  virtual MetadataMatchCriteriaConstPtr
+  filterMatchCriteria(const std::set<std::string>& names) const PURE;
 };
+
+/**
+ * Criterion that a route entry uses for matching TLS connection context.
+ */
+class TlsContextMatchCriteria {
+public:
+  virtual ~TlsContextMatchCriteria() = default;
+
+  /**
+   * @return bool indicating whether the client presented credentials.
+   */
+  virtual const absl::optional<bool>& presented() const PURE;
+
+  /**
+   * @return bool indicating whether the client credentials successfully validated against the TLS
+   * context validation context.
+   */
+  virtual const absl::optional<bool>& validated() const PURE;
+};
+
+using TlsContextMatchCriteriaConstPtr = std::unique_ptr<const TlsContextMatchCriteria>;
 
 /**
  * Type of path matching that a route entry uses.
@@ -545,7 +603,7 @@ enum class PathMatchType {
  */
 class PathMatchCriterion {
 public:
-  virtual ~PathMatchCriterion() {}
+  virtual ~PathMatchCriterion() = default;
 
   /**
    * @return PathMatchType type of path match.
@@ -568,7 +626,7 @@ class HttpRouteTypedMetadataFactory : public Envoy::Config::TypedMetadataFactory
  */
 class RouteEntry : public ResponseEntry {
 public:
-  virtual ~RouteEntry() {}
+  ~RouteEntry() override = default;
 
   /**
    * @return const std::string& the upstream cluster that owns the route.
@@ -594,14 +652,14 @@ public:
    * @param stream_info holds additional information about the request.
    * @param insert_envoy_original_path insert x-envoy-original-path header if path rewritten?
    */
-  virtual void finalizeRequestHeaders(Http::HeaderMap& headers,
+  virtual void finalizeRequestHeaders(Http::RequestHeaderMap& headers,
                                       const StreamInfo::StreamInfo& stream_info,
                                       bool insert_envoy_original_path) const PURE;
 
   /**
    * @return const HashPolicy* the optional hash policy for the route.
    */
-  virtual const HashPolicy* hashPolicy() const PURE;
+  virtual const Http::HashPolicy* hashPolicy() const PURE;
 
   /**
    * @return const HedgePolicy& the hedge policy for the route. All routes have a hedge policy even
@@ -626,10 +684,19 @@ public:
   virtual const RetryPolicy& retryPolicy() const PURE;
 
   /**
-   * @return const ShadowPolicy& the shadow policy for the route. All routes have a shadow policy
-   *         even if no shadowing takes place.
+   * @return uint32_t any route cap on bytes which should be buffered for shadowing or retries.
+   *         This is an upper bound so does not necessarily reflect the bytes which will be buffered
+   *         as other limits may apply.
+   *         Unlike some other buffer limits, 0 here indicates buffering should not be performed
+   *         rather than no limit applies.
    */
-  virtual const ShadowPolicy& shadowPolicy() const PURE;
+  virtual uint32_t retryShadowBufferLimit() const PURE;
+
+  /**
+   * @return const std::vector<ShadowPolicy>& the shadow policies for the route. The vector is empty
+   *         if no shadowing takes place.
+   */
+  virtual const std::vector<ShadowPolicyPtr>& shadowPolicies() const PURE;
 
   /**
    * @return std::chrono::milliseconds the route's timeout.
@@ -700,7 +767,13 @@ public:
    * @return const envoy::api::v2::core::Metadata& return the metadata provided in the config for
    * this route.
    */
-  virtual const envoy::api::v2::core::Metadata& metadata() const PURE;
+  virtual const envoy::config::core::v3::Metadata& metadata() const PURE;
+
+  /**
+   * @return TlsContextMatchCriteria* the tls context match criterion for this route. If there is no
+   * tls context match criteria, nullptr is returned.
+   */
+  virtual const TlsContextMatchCriteria* tlsContextMatchCriteria() const PURE;
 
   /**
    * @return const PathMatchCriterion& the match criterion for this route.
@@ -723,13 +796,30 @@ public:
   };
 
   /**
+   * This is a helper to get the route's per-filter config if it exists, otherwise the virtual
+   * host's. Or nullptr if none of them exist.
+   */
+  template <class Derived>
+  const Derived* mostSpecificPerFilterConfigTyped(const std::string& name) const {
+    const Derived* config = perFilterConfigTyped<Derived>(name);
+    return config ? config : virtualHost().perFilterConfigTyped<Derived>(name);
+  }
+
+  /**
    * True if the virtual host this RouteEntry belongs to is configured to include the attempt
    * count header.
    * @return bool whether x-envoy-attempt-count should be included on the upstream request.
    */
-  virtual bool includeAttemptCount() const PURE;
+  virtual bool includeAttemptCountInRequest() const PURE;
 
-  typedef std::map<std::string, bool> UpgradeMap;
+  /**
+   * True if the virtual host this RouteEntry belongs to is configured to include the attempt
+   * count header.
+   * @return bool whether x-envoy-attempt-count should be included on the downstream response.
+   */
+  virtual bool includeAttemptCountInResponse() const PURE;
+
+  using UpgradeMap = std::map<std::string, bool>;
   /**
    * @return a map of route-specific upgrades to their enabled/disabled status.
    */
@@ -739,6 +829,12 @@ public:
    * @returns the internal redirect action which should be taken on this route.
    */
   virtual InternalRedirectAction internalRedirectAction() const PURE;
+
+  /**
+   * @returns the threshold of number of previously handled internal redirects, for this route to
+   * stop handle internal redirects.
+   */
+  virtual uint32_t maxInternalRedirects() const PURE;
 
   /**
    * @return std::string& the name of the route.
@@ -751,7 +847,7 @@ public:
  */
 class Decorator {
 public:
-  virtual ~Decorator() {}
+  virtual ~Decorator() = default;
 
   /**
    * This method decorates the supplied span.
@@ -764,44 +860,57 @@ public:
    * @return the operation name
    */
   virtual const std::string& getOperation() const PURE;
+
+  /**
+   * This method returns whether the decorator information
+   * should be propagated to other services.
+   * @return whether to propagate
+   */
+  virtual bool propagate() const PURE;
 };
 
-typedef std::unique_ptr<const Decorator> DecoratorConstPtr;
+using DecoratorConstPtr = std::unique_ptr<const Decorator>;
 
 /**
  * An interface representing the Tracing for the route configuration.
  */
 class RouteTracing {
 public:
-  virtual ~RouteTracing() {}
+  virtual ~RouteTracing() = default;
 
   /**
    * This method returns the client sampling percentage.
    * @return the client sampling percentage
    */
-  virtual const envoy::type::FractionalPercent& getClientSampling() const PURE;
+  virtual const envoy::type::v3::FractionalPercent& getClientSampling() const PURE;
 
   /**
    * This method returns the random sampling percentage.
    * @return the random sampling percentage
    */
-  virtual const envoy::type::FractionalPercent& getRandomSampling() const PURE;
+  virtual const envoy::type::v3::FractionalPercent& getRandomSampling() const PURE;
 
   /**
    * This method returns the overall sampling percentage.
    * @return the overall sampling percentage
    */
-  virtual const envoy::type::FractionalPercent& getOverallSampling() const PURE;
+  virtual const envoy::type::v3::FractionalPercent& getOverallSampling() const PURE;
+
+  /**
+   * This method returns the route level tracing custom tags.
+   * @return the tracing custom tags.
+   */
+  virtual const Tracing::CustomTagMap& getCustomTags() const PURE;
 };
 
-typedef std::unique_ptr<const RouteTracing> RouteTracingConstPtr;
+using RouteTracingConstPtr = std::unique_ptr<const RouteTracing>;
 
 /**
  * An interface that holds a DirectResponseEntry or RouteEntry for a request.
  */
 class Route {
 public:
-  virtual ~Route() {}
+  virtual ~Route() = default;
 
   /**
    * @return the direct response entry or nullptr if there is no direct response for the request.
@@ -839,14 +948,14 @@ public:
   }
 };
 
-typedef std::shared_ptr<const Route> RouteConstSharedPtr;
+using RouteConstSharedPtr = std::shared_ptr<const Route>;
 
 /**
  * The router configuration.
  */
 class Config {
 public:
-  virtual ~Config() {}
+  virtual ~Config() = default;
 
   /**
    * Based on the incoming HTTP request headers, determine the target route (containing either a
@@ -856,7 +965,8 @@ public:
    *        allows stable choices between calls if desired.
    * @return the route or nullptr if there is no matching route for the request.
    */
-  virtual RouteConstSharedPtr route(const Http::HeaderMap& headers,
+  virtual RouteConstSharedPtr route(const Http::RequestHeaderMap& headers,
+                                    const StreamInfo::StreamInfo& stream_info,
                                     uint64_t random_value) const PURE;
 
   /**
@@ -874,9 +984,16 @@ public:
    * @return whether router configuration uses VHDS.
    */
   virtual bool usesVhds() const PURE;
+
+  /**
+   * @return bool whether most specific header mutations should take precedence. The default
+   * evaluation order is route level, then virtual host level and finally global connection
+   * manager level.
+   */
+  virtual bool mostSpecificHeaderMutationsWins() const PURE;
 };
 
-typedef std::shared_ptr<const Config> ConfigConstSharedPtr;
+using ConfigConstSharedPtr = std::shared_ptr<const Config>;
 
 } // namespace Router
 } // namespace Envoy

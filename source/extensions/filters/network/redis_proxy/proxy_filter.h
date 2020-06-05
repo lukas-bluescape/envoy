@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-#include "envoy/config/filter/network/redis_proxy/v2/redis_proxy.pb.h"
+#include "envoy/extensions/filters/network/redis_proxy/v3/redis_proxy.pb.h"
 #include "envoy/network/drain_decision.h"
 #include "envoy/network/filter.h"
 #include "envoy/stats/scope.h"
@@ -48,7 +48,7 @@ struct ProxyStats {
  */
 class ProxyFilterConfig {
 public:
-  ProxyFilterConfig(const envoy::config::filter::network::redis_proxy::v2::RedisProxy& config,
+  ProxyFilterConfig(const envoy::extensions::filters::network::redis_proxy::v3::RedisProxy& config,
                     Stats::Scope& scope, const Network::DrainDecision& drain_decision,
                     Runtime::Loader& runtime, Api::Api& api);
 
@@ -63,7 +63,7 @@ private:
   static ProxyStats generateStats(const std::string& prefix, Stats::Scope& scope);
 };
 
-typedef std::shared_ptr<ProxyFilterConfig> ProxyFilterConfigSharedPtr;
+using ProxyFilterConfigSharedPtr = std::shared_ptr<ProxyFilterConfig>;
 
 /**
  * A redis multiplexing proxy filter. This filter will take incoming redis pipelined commands, and
@@ -75,7 +75,7 @@ class ProxyFilter : public Network::ReadFilter,
 public:
   ProxyFilter(Common::Redis::DecoderFactory& factory, Common::Redis::EncoderPtr&& encoder,
               CommandSplitter::Instance& splitter, ProxyFilterConfigSharedPtr config);
-  ~ProxyFilter();
+  ~ProxyFilter() override;
 
   // Network::ReadFilter
   void initializeReadFilterCallbacks(Network::ReadFilterCallbacks& callbacks) override;
@@ -95,7 +95,7 @@ public:
 private:
   struct PendingRequest : public CommandSplitter::SplitCallbacks {
     PendingRequest(ProxyFilter& parent);
-    ~PendingRequest();
+    ~PendingRequest() override;
 
     // RedisProxy::CommandSplitter::SplitCallbacks
     bool connectionAllowed() override { return parent_.connectionAllowed(); }

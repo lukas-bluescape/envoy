@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -13,20 +14,29 @@
 namespace Envoy {
 namespace Filesystem {
 
+using FlagSet = std::bitset<4>;
+
 /**
  * Abstraction for a basic file on disk.
  */
 class File {
 public:
-  virtual ~File() {}
+  virtual ~File() = default;
+
+  enum Operation {
+    Read,
+    Write,
+    Create,
+    Append,
+  };
 
   /**
-   * Open the file with O_RDWR | O_APPEND | O_CREAT
+   * Open the file with Flag
    * The file will be closed when this object is destructed
    *
    * @return bool whether the open succeeded
    */
-  virtual Api::IoCallBoolResult open() PURE;
+  virtual Api::IoCallBoolResult open(FlagSet flags) PURE;
 
   /**
    * Write the buffer to the file. The file must be explicitly opened before writing.
@@ -56,11 +66,20 @@ public:
 using FilePtr = std::unique_ptr<File>;
 
 /**
+ * Contains the result of splitting the file name and its parent directory from
+ * a given file path.
+ */
+struct PathSplitResult {
+  absl::string_view directory_;
+  absl::string_view file_;
+};
+
+/**
  * Abstraction for some basic filesystem operations
  */
 class Instance {
 public:
-  virtual ~Instance() {}
+  virtual ~Instance() = default;
 
   /**
    *  @param path The path of the File
@@ -93,6 +112,13 @@ public:
   virtual std::string fileReadToEnd(const std::string& path) PURE;
 
   /**
+   * @path file path to split
+   * @return PathSplitResult containing the parent directory of the input path and the file name
+   * @note will throw an exception if path does not contain any path separator character
+   */
+  virtual PathSplitResult splitPathFromFilename(absl::string_view path) PURE;
+
+  /**
    * Determine if the path is on a list of paths Envoy will refuse to access. This
    * is a basic sanity check for users, blacklisting some clearly bad paths. Paths
    * may still be problematic (e.g. indirectly leading to /dev/mem) even if this
@@ -120,15 +146,11 @@ struct DirectoryEntry {
   }
 };
 
-/**
- * Abstraction for listing a directory.
- * TODO(sesmith177): replace with std::filesystem::directory_iterator once we move to C++17
- */
 class DirectoryIteratorImpl;
 class DirectoryIterator {
 public:
   DirectoryIterator() : entry_({"", FileType::Other}) {}
-  virtual ~DirectoryIterator() {}
+  virtual ~DirectoryIterator() = default;
 
   const DirectoryEntry& operator*() const { return entry_; }
 

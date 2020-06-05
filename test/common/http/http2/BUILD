@@ -19,12 +19,20 @@ envoy_cc_test(
         "//source/common/event:dispatcher_lib",
         "//source/common/http:exception_lib",
         "//source/common/http:header_map_lib",
+        "//source/common/http:header_utility_lib",
         "//source/common/http/http2:codec_lib",
         "//source/common/stats:stats_lib",
         "//test/common/http:common_lib",
+        "//test/common/http/http2:http2_frame",
+        "//test/common/stats:stat_test_utility_lib",
         "//test/mocks/http:http_mocks",
+        "//test/mocks/init:init_mocks",
+        "//test/mocks/local_info:local_info_mocks",
         "//test/mocks/network:network_mocks",
+        "//test/mocks/protobuf:protobuf_mocks",
+        "//test/mocks/thread_local:thread_local_mocks",
         "//test/mocks/upstream:upstream_mocks",
+        "//test/test_common:test_runtime_lib",
         "//test/test_common:utility_lib",
     ],
 )
@@ -32,6 +40,7 @@ envoy_cc_test(
 envoy_cc_test_library(
     name = "codec_impl_test_util",
     hdrs = ["codec_impl_test_util.h"],
+    external_deps = ["abseil_optional"],
     deps = [
         "//source/common/http/http2:codec_lib",
     ],
@@ -56,6 +65,34 @@ envoy_cc_test(
     ],
 )
 
+envoy_cc_test(
+    name = "conn_pool_legacy_test",
+    srcs = ["conn_pool_legacy_test.cc"],
+    deps = [
+        "//source/common/event:dispatcher_lib",
+        "//source/common/http/http2:conn_pool_legacy_lib",
+        "//source/common/network:utility_lib",
+        "//source/common/upstream:upstream_includes",
+        "//source/common/upstream:upstream_lib",
+        "//test/common/http:common_lib",
+        "//test/common/upstream:utility_lib",
+        "//test/mocks/event:event_mocks",
+        "//test/mocks/http:http_mocks",
+        "//test/mocks/network:network_mocks",
+        "//test/mocks/runtime:runtime_mocks",
+        "//test/mocks/upstream:upstream_mocks",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "http2_frame",
+    srcs = ["http2_frame.cc"],
+    hdrs = ["http2_frame.h"],
+    deps = [
+        "//source/common/common:macros",
+    ],
+)
+
 envoy_cc_test_library(
     name = "frame_replay_lib",
     srcs = ["frame_replay.cc"],
@@ -63,6 +100,7 @@ envoy_cc_test_library(
     deps = [
         "//source/common/common:hex_lib",
         "//source/common/common:macros",
+        "//source/common/http:utility_lib",
         "//source/common/http/http2:codec_lib",
         "//test/common/http:common_lib",
         "//test/common/http/http2:codec_impl_test_util",
@@ -96,6 +134,7 @@ envoy_cc_test(
         "//source/common/http/http2:metadata_decoder_lib",
         "//source/common/http/http2:metadata_encoder_lib",
         "//source/common/runtime:runtime_lib",
+        "//test/test_common:logging_lib",
         "//test/test_common:utility_lib",
     ],
 )

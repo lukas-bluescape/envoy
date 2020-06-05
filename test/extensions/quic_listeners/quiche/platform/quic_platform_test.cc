@@ -25,16 +25,16 @@
 #include "test/test_common/threadsafe_singleton_injector.h"
 #include "test/test_common/utility.h"
 
+#include "fmt/printf.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "quiche/common/platform/api/quiche_string_piece.h"
 #include "quiche/epoll_server/fake_simple_epoll_server.h"
 #include "quiche/quic/platform/api/quic_aligned.h"
-#include "quiche/quic/platform/api/quic_arraysize.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
 #include "quiche/quic/platform/api/quic_cert_utils.h"
 #include "quiche/quic/platform/api/quic_client_stats.h"
 #include "quiche/quic/platform/api/quic_containers.h"
-#include "quiche/quic/platform/api/quic_endian.h"
 #include "quiche/quic/platform/api/quic_estimate_memory_usage.h"
 #include "quiche/quic/platform/api/quic_expect_bug.h"
 #include "quiche/quic/platform/api/quic_exported_stats.h"
@@ -42,6 +42,7 @@
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_hostname_utils.h"
 #include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/quic/platform/api/quic_macros.h"
 #include "quiche/quic/platform/api/quic_map_util.h"
 #include "quiche/quic/platform/api/quic_mem_slice.h"
 #include "quiche/quic/platform/api/quic_mem_slice_span.h"
@@ -55,7 +56,6 @@
 #include "quiche/quic/platform/api/quic_sleep.h"
 #include "quiche/quic/platform/api/quic_stack_trace.h"
 #include "quiche/quic/platform/api/quic_stream_buffer_allocator.h"
-#include "quiche/quic/platform/api/quic_string_piece.h"
 #include "quiche/quic/platform/api/quic_system_event_loop.h"
 #include "quiche/quic/platform/api/quic_test.h"
 #include "quiche/quic/platform/api/quic_test_output.h"
@@ -83,7 +83,7 @@ protected:
     GetLogger().set_level(ERROR);
   }
 
-  ~QuicPlatformTest() {
+  ~QuicPlatformTest() override {
     SetVerbosityLogThreshold(verbosity_log_threshold_);
     GetLogger().set_level(log_level_);
   }
@@ -93,11 +93,6 @@ protected:
 };
 
 TEST_F(QuicPlatformTest, QuicAlignOf) { EXPECT_LT(0, QUIC_ALIGN_OF(int)); }
-
-TEST_F(QuicPlatformTest, QuicArraysize) {
-  int array[] = {0, 1, 2, 3, 4};
-  EXPECT_EQ(5, QUIC_ARRAYSIZE(array));
-}
 
 enum class TestEnum { ZERO = 0, ONE, TWO, COUNT };
 
@@ -120,6 +115,9 @@ TEST_F(QuicPlatformTest, QuicClientStats) {
                               100, "doc");
   QUIC_CLIENT_HISTOGRAM_COUNTS("my.count.histogram", 123, 0, 1000, 100, "doc");
   QuicClientSparseHistogram("my.sparse.histogram", 345);
+  // Make sure compiler doesn't report unused-parameter error.
+  bool should_be_used;
+  QUIC_CLIENT_HISTOGRAM_BOOL("my.bool.histogram", should_be_used, "doc");
 }
 
 TEST_F(QuicPlatformTest, QuicExpectBug) {
@@ -171,21 +169,10 @@ TEST_F(QuicPlatformTest, QuicQueue) {
   EXPECT_EQ(10, queue.back());
 }
 
-TEST_F(QuicPlatformTest, QuicDeque) {
-  QuicDeque<int> deque;
-  deque.push_back(10);
-  EXPECT_EQ(10, deque.back());
-}
-
 TEST_F(QuicPlatformTest, QuicInlinedVector) {
   QuicInlinedVector<int, 5> vec;
   vec.push_back(3);
   EXPECT_EQ(3, vec[0]);
-}
-
-TEST_F(QuicPlatformTest, QuicEndian) {
-  EXPECT_EQ(0x1234, QuicEndian::NetToHost16(QuicEndian::HostToNet16(0x1234)));
-  EXPECT_EQ(0x12345678, QuicEndian::NetToHost32(QuicEndian::HostToNet32(0x12345678)));
 }
 
 TEST_F(QuicPlatformTest, QuicEstimateMemoryUsage) {
@@ -257,12 +244,6 @@ TEST_F(QuicPlatformTest, QuicStackTraceTest) {
 
 TEST_F(QuicPlatformTest, QuicSleep) { QuicSleep(QuicTime::Delta::FromMilliseconds(20)); }
 
-TEST_F(QuicPlatformTest, QuicStringPiece) {
-  std::string s = "bar";
-  QuicStringPiece sp(s);
-  EXPECT_EQ('b', sp[0]);
-}
-
 TEST_F(QuicPlatformTest, QuicThread) {
   class AdderThread : public QuicThread {
   public:
@@ -305,10 +286,7 @@ TEST_F(QuicPlatformTest, QuicUint128) {
 }
 
 TEST_F(QuicPlatformTest, QuicPtrUtil) {
-  auto p = QuicMakeUnique<std::string>("abc");
-  EXPECT_EQ("abc", *p);
-
-  p = QuicWrapUnique(new std::string("aaa"));
+  auto p = QuicWrapUnique(new std::string("aaa"));
   EXPECT_EQ("aaa", *p);
 }
 
@@ -355,6 +333,18 @@ TEST_F(QuicPlatformTest, QuicLog) {
 #else
 #define VALUE_BY_COMPILE_MODE(debug_mode_value, release_mode_value) debug_mode_value
 #endif
+
+TEST_F(QuicPlatformTest, LogIoManipulators) {
+  GetLogger().set_level(ERROR);
+  QUIC_DLOG(ERROR) << "aaaa" << std::endl;
+  EXPECT_LOG_CONTAINS("error", "aaaa\n\n", QUIC_LOG(ERROR) << "aaaa" << std::endl << std::endl);
+  EXPECT_LOG_NOT_CONTAINS("error", "aaaa\n\n\n",
+                          QUIC_LOG(ERROR) << "aaaa" << std::endl
+                                          << std::endl);
+
+  EXPECT_LOG_CONTAINS("error", "42 in octal is 52",
+                      QUIC_LOG(ERROR) << 42 << " in octal is " << std::oct << 42);
+}
 
 TEST_F(QuicPlatformTest, QuicDLog) {
   int i = 0;
@@ -473,9 +463,9 @@ TEST_F(QuicPlatformTest, QuicCertUtils) {
   unsigned char* der = nullptr;
   int len = i2d_X509(x509_cert.get(), &der);
   ASSERT_GT(len, 0);
-  QuicStringPiece out;
+  quiche::QuicheStringPiece out;
   QuicCertUtils::ExtractSubjectNameFromDERCert(
-      QuicStringPiece(reinterpret_cast<const char*>(der), len), &out);
+      quiche::QuicheStringPiece(reinterpret_cast<const char*>(der), len), &out);
   EXPECT_EQ("0z1\v0\t\x6\x3U\x4\x6\x13\x2US1\x13"
             "0\x11\x6\x3U\x4\b\f\nCalifornia1\x16"
             "0\x14\x6\x3U\x4\a\f\rSan Francisco1\r"
@@ -492,12 +482,25 @@ TEST_F(QuicPlatformTest, QuicTestOutput) {
   // Set log level to INFO to see the test output path in log.
   GetLogger().set_level(INFO);
 
-  EXPECT_LOG_NOT_CONTAINS("warn", "",
-                          QuicRecordTestOutput("quic_test_output.1", "output 1 content\n"));
-  EXPECT_LOG_NOT_CONTAINS("error", "",
-                          QuicRecordTestOutput("quic_test_output.2", "output 2 content\n"));
+  EXPECT_LOG_NOT_CONTAINS("warn", "", QuicRecordTrace("quic_test_output.1", "output 1 content\n"));
+  EXPECT_LOG_NOT_CONTAINS("error", "", QuicRecordTrace("quic_test_output.2", "output 2 content\n"));
   EXPECT_LOG_CONTAINS("info", "Recorded test output into",
-                      QuicRecordTestOutput("quic_test_output.3", "output 3 content\n"));
+                      QuicRecordTrace("quic_test_output.3", "output 3 content\n"));
+
+  std::string content4{"output 4 content\n"};
+  const testing::TestInfo* test_info = testing::UnitTest::GetInstance()->current_test_info();
+
+  std::string timestamp = absl::FormatTime("%Y%m%d%H%M%S", absl::Now(), absl::LocalTimeZone());
+
+  std::string filename = fmt::sprintf("%s.%s.%s.%s.qtr", test_info->name(),
+                                      test_info->test_case_name(), "quic_test_output.4", timestamp);
+
+  EXPECT_LOG_CONTAINS("info", "Recorded test output into", QuicSaveTestOutput(filename, content4));
+
+  std::string content;
+  EXPECT_TRUE(QuicLoadTestOutput(filename, &content));
+  EXPECT_EQ("output 4 content\n", content);
+  EXPECT_FALSE(QuicLoadTestOutput("nonexisting_file", &content));
 }
 
 TEST_F(QuicPlatformTest, ApproximateNowInUsec) {
@@ -604,7 +607,7 @@ public:
   }
 
 protected:
-  void SetUp() override { Envoy::TestUtility::createDirectory(dir_path_); }
+  void SetUp() override { Envoy::TestEnvironment::createPath(dir_path_); }
 
   void TearDown() override {
     while (!files_to_remove_.empty()) {
@@ -617,7 +620,7 @@ protected:
   void addSubDirs(std::list<std::string> sub_dirs) {
     for (const std::string& dir_name : sub_dirs) {
       const std::string full_path = dir_path_ + "/" + dir_name;
-      Envoy::TestUtility::createDirectory(full_path);
+      Envoy::TestEnvironment::createPath(full_path);
       files_to_remove_.push(full_path);
     }
   }
@@ -654,7 +657,7 @@ TEST_F(FileUtilsTest, ReadFileContents) {
 }
 
 TEST_F(QuicPlatformTest, PickUnsedPort) {
-  int port = QuicPickUnusedPortOrDie();
+  int port = QuicPickServerPortForTestsOrDie();
   std::vector<Envoy::Network::Address::IpVersion> supported_versions =
       Envoy::TestEnvironment::getIpVersionsForTest();
   for (auto ip_version : supported_versions) {
@@ -674,29 +677,27 @@ TEST_F(QuicPlatformTest, FailToPickUnsedPort) {
   Envoy::TestThreadsafeSingletonInjector<Envoy::Api::OsSysCallsImpl> os_calls(&os_sys_calls);
   // Actually create sockets.
   EXPECT_CALL(os_sys_calls, socket(_, _, _)).WillRepeatedly([](int domain, int type, int protocol) {
-    int fd = ::socket(domain, type, protocol);
-    return Envoy::Api::SysCallIntResult{fd, errno};
+    os_fd_t fd = ::socket(domain, type, protocol);
+    return Envoy::Api::SysCallSocketResult{fd, errno};
   });
   // Fail bind call's to mimic port exhaustion.
   EXPECT_CALL(os_sys_calls, bind(_, _, _))
       .WillRepeatedly(Return(Envoy::Api::SysCallIntResult{-1, EADDRINUSE}));
-  EXPECT_DEATH_LOG_TO_STDERR(QuicPickUnusedPortOrDie(), "Failed to pick a port for test.");
+  EXPECT_DEATH_LOG_TO_STDERR(QuicPickServerPortForTestsOrDie(), "Failed to pick a port for test.");
 }
 
 TEST_F(QuicPlatformTest, TestEnvoyQuicBufferAllocator) {
-  bool deterministic_stats = Envoy::Stats::TestUtil::hasDeterministicMallocStats();
-  const size_t start_mem = Envoy::Memory::Stats::totalCurrentlyAllocated();
   QuicStreamBufferAllocator allocator;
-  char* p = allocator.New(1024);
-  if (deterministic_stats) {
-    EXPECT_LT(start_mem, Envoy::Memory::Stats::totalCurrentlyAllocated());
+  Envoy::Stats::TestUtil::MemoryTest memory_test;
+  if (memory_test.mode() == Envoy::Stats::TestUtil::MemoryTest::Mode::Disabled) {
+    return;
   }
+  char* p = allocator.New(1024);
   EXPECT_NE(nullptr, p);
+  EXPECT_GT(memory_test.consumedBytes(), 0);
   memset(p, 'a', 1024);
   allocator.Delete(p);
-  if (deterministic_stats) {
-    EXPECT_EQ(start_mem, Envoy::Memory::Stats::totalCurrentlyAllocated());
-  }
+  EXPECT_EQ(memory_test.consumedBytes(), 0);
 }
 
 TEST_F(QuicPlatformTest, TestSystemEventLoop) {
@@ -706,16 +707,15 @@ TEST_F(QuicPlatformTest, TestSystemEventLoop) {
   QuicSystemEventLoop("dummy");
 }
 
-class QuicMemSliceTest : public Envoy::Buffer::BufferImplementationParamTest {
-public:
-  ~QuicMemSliceTest() override {}
-};
+QUIC_MUST_USE_RESULT bool dummyTestFunction() { return false; }
 
-INSTANTIATE_TEST_CASE_P(QuicMemSliceTests, QuicMemSliceTest,
-                        testing::ValuesIn({Envoy::Buffer::BufferImplementation::Old,
-                                           Envoy::Buffer::BufferImplementation::New}));
+TEST_F(QuicPlatformTest, TestQuicMacros) {
+  // Just make sure it compiles.
+  EXPECT_FALSE(dummyTestFunction());
+  int a QUIC_UNUSED;
+}
 
-TEST_P(QuicMemSliceTest, ConstructMemSliceFromBuffer) {
+TEST(EnvoyQuicMemSliceTest, ConstructMemSliceFromBuffer) {
   std::string str(512, 'b');
   // Fragment needs to out-live buffer.
   bool fragment_releaser_called = false;
@@ -726,18 +726,17 @@ TEST_P(QuicMemSliceTest, ConstructMemSliceFromBuffer) {
         fragment_releaser_called = true;
       });
   Envoy::Buffer::OwnedImpl buffer;
-  Envoy::Buffer::BufferImplementationParamTest::verifyImplementation(buffer);
   EXPECT_DEBUG_DEATH(quic::QuicMemSlice slice0{quic::QuicMemSliceImpl(buffer, 0)}, "");
   std::string str2(1024, 'a');
   // str2 is copied.
   buffer.add(str2);
-  EXPECT_EQ(1u, buffer.getRawSlices(nullptr, 0));
+  EXPECT_EQ(1u, buffer.getRawSlices().size());
   buffer.addBufferFragment(fragment);
 
   quic::QuicMemSlice slice1{quic::QuicMemSliceImpl(buffer, str2.length())};
   EXPECT_EQ(str.length(), buffer.length());
   EXPECT_EQ(str2, std::string(slice1.data(), slice1.length()));
-  std::string str2_old = str2;
+  std::string str2_old = str2; // NOLINT(performance-unnecessary-copy-initialization)
   // slice1 is released, but str2 should not be affected.
   slice1.Reset();
   EXPECT_TRUE(slice1.empty());
@@ -754,9 +753,20 @@ TEST_P(QuicMemSliceTest, ConstructMemSliceFromBuffer) {
   EXPECT_TRUE(fragment_releaser_called);
 }
 
-TEST_P(QuicMemSliceTest, QuicMemSliceStorage) {
+TEST(EnvoyQuicMemSliceTest, ConstructQuicMemSliceSpan) {
+  Envoy::Buffer::OwnedImpl buffer;
+  std::string str(1024, 'a');
+  buffer.add(str);
+  quic::QuicMemSlice slice{quic::QuicMemSliceImpl(buffer, str.length())};
+
+  QuicMemSliceSpan span(&slice);
+  EXPECT_EQ(1024u, span.total_length());
+  EXPECT_EQ(str, span.GetData(0));
+}
+
+TEST(EnvoyQuicMemSliceTest, QuicMemSliceStorage) {
   std::string str(512, 'a');
-  struct iovec iov = {const_cast<char*>(str.data()), str.length()};
+  iovec iov = {const_cast<char*>(str.data()), str.length()};
   SimpleBufferAllocator allocator;
   QuicMemSliceStorage storage(&iov, 1, &allocator, 1024);
   // Test copy constructor.

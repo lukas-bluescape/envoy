@@ -19,6 +19,7 @@ envoy_cc_test(
         "//source/common/profiler:profiler_lib",
         "//source/common/protobuf",
         "//source/common/protobuf:utility_lib",
+        "//source/common/stats:symbol_table_creator_lib",
         "//source/common/stats:thread_local_store_lib",
         "//source/extensions/transport_sockets/tls:context_config_lib",
         "//source/server/http:admin_lib",
@@ -28,7 +29,20 @@ envoy_cc_test(
         "//test/test_common:logging_lib",
         "//test/test_common:network_utility_lib",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/admin/v2alpha:memory_cc",
+        "@envoy_api//envoy/admin/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "admin_filter_test",
+    srcs = ["admin_filter_test.cc"],
+    deps = [
+        "//source/server/http:admin_filter_lib",
+        "//test/mocks/server:server_mocks",
+        "//test/test_common:environment_lib",
     ],
 )
 

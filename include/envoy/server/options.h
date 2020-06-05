@@ -4,8 +4,9 @@
 #include <cstdint>
 #include <string>
 
-#include "envoy/admin/v2alpha/server_info.pb.h"
+#include "envoy/admin/v3/server_info.pb.h"
 #include "envoy/common/pure.h"
+#include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/network/address.h"
 
 #include "spdlog/spdlog.h"
@@ -40,14 +41,14 @@ enum class Mode {
   // to be validated in a non-prod environment.
 };
 
-typedef std::unique_ptr<envoy::admin::v2alpha::CommandLineOptions> CommandLineOptionsPtr;
+using CommandLineOptionsPtr = std::unique_ptr<envoy::admin::v3::CommandLineOptions>;
 
 /**
  * General options for the server.
  */
 class Options {
 public:
-  virtual ~Options() {}
+  virtual ~Options() = default;
 
   /**
    * @return uint64_t the base ID for the server. This is required for system-wide things like
@@ -79,9 +80,20 @@ public:
   virtual const std::string& configYaml() const PURE;
 
   /**
-   * @return bool allow unknown fields in the configuration?
+   * @return const envoy::config::bootstrap::v2::Bootstrap& a bootstrap proto object
+   * that merges into the config last, after configYaml and configPath.
    */
-  virtual bool allowUnknownFields() const PURE;
+  virtual const envoy::config::bootstrap::v3::Bootstrap& configProto() const PURE;
+
+  /**
+   * @return bool allow unknown fields in the static configuration?
+   */
+  virtual bool allowUnknownStaticFields() const PURE;
+
+  /**
+   * @return bool allow unknown fields in the dynamic configuration?
+   */
+  virtual bool rejectUnknownDynamicFields() const PURE;
 
   /**
    * @return const std::string& the admin address output file.
@@ -109,6 +121,11 @@ public:
    * @return const std::string& the log format string.
    */
   virtual const std::string& logFormat() const PURE;
+
+  /**
+   * @return const bool indicating whether to escape c-style escape sequences in logs.
+   */
+  virtual bool logFormatEscaped() const PURE;
 
   /**
    * @return const std::string& the log file path.
@@ -168,14 +185,19 @@ public:
   virtual bool mutexTracingEnabled() const PURE;
 
   /**
-   * @return whether to use the old libevent evbuffer-based Buffer implementation.
+   * @return whether to use the fake symbol table implementation.
    */
-  virtual bool libeventBufferEnabled() const PURE;
+  virtual bool fakeSymbolTableEnabled() const PURE;
 
   /**
    * @return bool indicating whether cpuset size should determine the number of worker threads.
    */
   virtual bool cpusetThreadsEnabled() const PURE;
+
+  /**
+   * @return the names of extensions to disable.
+   */
+  virtual const std::vector<std::string>& disabledExtensions() const PURE;
 
   /**
    * Converts the Options in to CommandLineOptions proto message defined in server_info.proto.

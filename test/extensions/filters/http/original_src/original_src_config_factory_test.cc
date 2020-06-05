@@ -1,5 +1,5 @@
-#include "envoy/config/filter/http/original_src/v2alpha1/original_src.pb.h"
-#include "envoy/config/filter/http/original_src/v2alpha1/original_src.pb.validate.h"
+#include "envoy/extensions/filters/http/original_src/v3/original_src.pb.h"
+#include "envoy/extensions/filters/http/original_src/v3/original_src.pb.validate.h"
 
 #include "extensions/filters/http/original_src/config.h"
 #include "extensions/filters/http/original_src/original_src.h"
@@ -11,6 +11,7 @@
 #include "gtest/gtest.h"
 
 using testing::Invoke;
+using testing::NiceMock;
 
 namespace Envoy {
 namespace Extensions {
@@ -27,7 +28,7 @@ TEST(OriginalSrcHttpConfigFactoryTest, TestCreateFactory) {
   ProtobufTypes::MessagePtr proto_config = factory.createEmptyConfigProto();
   TestUtility::loadFromYaml(yaml, *proto_config);
 
-  Server::Configuration::MockFactoryContext context;
+  NiceMock<Server::Configuration::MockFactoryContext> context;
 
   Http::FilterFactoryCb cb = factory.createFilterFactoryFromProto(*proto_config, "", context);
 

@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "envoy/common/pure.h"
@@ -19,8 +20,20 @@ namespace Stats {
  * declaration for StatName is in source/common/stats/symbol_table_impl.h
  */
 class StatName;
+using StatNameVec = std::vector<StatName>;
 
 class StatNameList;
+class StatNameSet;
+
+using StatNameSetPtr = std::unique_ptr<StatNameSet>;
+
+/**
+ * Holds a range of indexes indicating which parts of a stat-name are
+ * dynamic. This is used to transfer stats from hot-restart parent to child,
+ * retaining the same name structure.
+ */
+using DynamicSpan = std::pair<uint32_t, uint32_t>;
+using DynamicSpans = std::vector<DynamicSpan>;
 
 /**
  * SymbolTable manages a namespace optimized for stat names, exploiting their
@@ -69,7 +82,7 @@ public:
   virtual std::string toString(const StatName& stat_name) const PURE;
 
   /**
-   * Deterines whether one StatName lexically precedes another. Note that
+   * Determines whether one StatName lexically precedes another. Note that
    * the lexical order may not exactly match the lexical order of the
    * elaborated strings. For example, stat-name of "-.-" would lexically
    * sort after "---" but when encoded as a StatName would come lexically
@@ -105,7 +118,7 @@ public:
    * @param stat_names the names to join.
    * @return Storage allocated for the joined name.
    */
-  virtual StoragePtr join(const std::vector<StatName>& stat_names) const PURE;
+  virtual StoragePtr join(const StatNameVec& stat_names) const PURE;
 
   /**
    * Populates a StatNameList from a list of encodings. This is not done at
@@ -116,8 +129,7 @@ public:
    * @param num_names The number of names.
    * @param symbol_table The symbol table in which to encode the names.
    */
-  virtual void populateList(const absl::string_view* names, uint32_t num_names,
-                            StatNameList& list) PURE;
+  virtual void populateList(const StatName* names, uint32_t num_names, StatNameList& list) PURE;
 
 #ifndef ENVOY_CONFIG_COVERAGE
   virtual void debugPrint() const PURE;
@@ -142,10 +154,59 @@ public:
   virtual void callWithStringView(StatName stat_name,
                                   const std::function<void(absl::string_view)>& fn) const PURE;
 
+  using RecentLookupsFn = std::function<void(absl::string_view, uint64_t)>;
+
+  /**
+   * Calls the provided function with the name of the most recently looked-up
+   * symbols, including lookups on any StatNameSets, and with a count of
+   * the recent lookups on that symbol.
+   *
+   * @param iter the function to call for every recent item.
+   */
+  virtual uint64_t getRecentLookups(const RecentLookupsFn& iter) const PURE;
+
+  /**
+   * Clears the recent-lookups structures.
+   */
+  virtual void clearRecentLookups() PURE;
+
+  /**
+   * Sets the recent-lookup capacity.
+   */
+  virtual void setRecentLookupCapacity(uint64_t capacity) PURE;
+
+  /**
+   * @return The configured recent-lookup tracking capacity.
+   */
+  virtual uint64_t recentLookupCapacity() const PURE;
+
+  /**
+   * Creates a StatNameSet.
+   *
+   * @param name the name of the set.
+   * @return the set.
+   */
+  virtual StatNameSetPtr makeSet(absl::string_view name) PURE;
+
+  /**
+   * Identifies the dynamic components of a stat_name into an array of integer
+   * pairs, indicating the begin/end of spans of tokens in the stat-name that
+   * are created from StatNameDynamicStore or StatNameDynamicPool.
+   *
+   * This can be used to reconstruct the same exact StatNames in
+   * StatNames::mergeStats(), to enable stat continuity across hot-restart.
+   *
+   * @param stat_name the input stat name.
+   * @return the array of pairs indicating the bounds.
+   */
+  virtual DynamicSpans getDynamicSpans(StatName stat_name) const PURE;
+
 private:
   friend struct HeapStatData;
+  friend class StatNameDynamicStorage;
   friend class StatNameStorage;
   friend class StatNameList;
+  friend class StatNameSet;
 
   // The following methods are private, but are called by friend classes
   // StatNameStorage and StatNameList, which must be friendly with SymbolTable
@@ -182,9 +243,11 @@ private:
    *
    */
   virtual StoragePtr encode(absl::string_view name) PURE;
+
+  virtual StoragePtr makeDynamicStorage(absl::string_view name) PURE;
 };
 
-using SharedSymbolTable = std::shared_ptr<SymbolTable>;
+using SymbolTablePtr = std::unique_ptr<SymbolTable>;
 
 } // namespace Stats
 } // namespace Envoy

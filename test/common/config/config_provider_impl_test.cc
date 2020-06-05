@@ -1,10 +1,12 @@
 #include <memory>
 
+#include "envoy/config/core/v3/config_source.pb.h"
+#include "envoy/service/discovery/v3/discovery.pb.h"
+
 #include "common/config/config_provider_impl.h"
 #include "common/protobuf/utility.h"
 
 #include "test/common/config/dummy_config.pb.h"
-#include "test/mocks/config/mocks.h"
 #include "test/mocks/server/mocks.h"
 #include "test/test_common/simulated_time_system.h"
 #include "test/test_common/utility.h"
@@ -20,10 +22,26 @@ using testing::InSequence;
 
 class DummyConfigProviderManager;
 
+class DummyConfig : public Envoy::Config::ConfigProvider::Config {
+public:
+  DummyConfig() = default;
+  explicit DummyConfig(const test::common::config::DummyConfig& config_proto) {
+    protos_.push_back(config_proto);
+  }
+  void addProto(const test::common::config::DummyConfig& config_proto) {
+    protos_.push_back(config_proto);
+  }
+
+  uint32_t numProtos() const { return protos_.size(); }
+
+private:
+  std::vector<test::common::config::DummyConfig> protos_;
+};
+
 class StaticDummyConfigProvider : public ImmutableConfigProviderBase {
 public:
   StaticDummyConfigProvider(const test::common::config::DummyConfig& config_proto,
-                            Server::Configuration::FactoryContext& factory_context,
+                            Server::Configuration::ServerFactoryContext& factory_context,
                             DummyConfigProviderManager& config_provider_manager);
 
   ~StaticDummyConfigProvider() override = default;
@@ -46,13 +64,19 @@ class DummyConfigSubscription : public ConfigSubscriptionInstance,
                                 Envoy::Config::SubscriptionCallbacks {
 public:
   DummyConfigSubscription(const uint64_t manager_identifier,
-                          Server::Configuration::FactoryContext& factory_context,
+                          Server::Configuration::ServerFactoryContext& factory_context,
                           DummyConfigProviderManager& config_provider_manager);
-
   ~DummyConfigSubscription() override = default;
 
   // Envoy::Config::ConfigSubscriptionCommonBase
   void start() override {}
+
+  // Envoy::Config::ConfigSubscriptionInstance
+  ConfigProvider::ConfigConstSharedPtr
+  onConfigProtoUpdate(const Protobuf::Message& config_proto) override {
+    return std::make_shared<DummyConfig>(
+        static_cast<const test::common::config::DummyConfig&>(config_proto));
+  }
 
   // Envoy::Config::SubscriptionCallbacks
   void onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>& resources,
@@ -64,13 +88,14 @@ public:
 
     ConfigSubscriptionCommonBase::onConfigUpdate();
   }
-  void onConfigUpdate(const Protobuf::RepeatedPtrField<envoy::api::v2::Resource>&,
+  void onConfigUpdate(const Protobuf::RepeatedPtrField<envoy::service::discovery::v3::Resource>&,
                       const Protobuf::RepeatedPtrField<std::string>&, const std::string&) override {
     NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
   }
 
   // Envoy::Config::SubscriptionCallbacks
-  void onConfigUpdateFailed(const EnvoyException*) override {}
+  void onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason,
+                            const EnvoyException*) override {}
 
   // Envoy::Config::SubscriptionCallbacks
   std::string resourceName(const ProtobufWkt::Any&) override { return ""; }
@@ -84,32 +109,16 @@ private:
 };
 using DummyConfigSubscriptionSharedPtr = std::shared_ptr<DummyConfigSubscription>;
 
-class DummyConfig : public ConfigProvider::Config {
+class DummyDynamicConfigProvider : public MutableConfigProviderCommonBase {
 public:
-  DummyConfig(const test::common::config::DummyConfig&) {}
-};
-
-class DummyDynamicConfigProvider : public MutableConfigProviderBase {
-public:
-  DummyDynamicConfigProvider(DummyConfigSubscriptionSharedPtr&& subscription,
-                             const ConfigConstSharedPtr& initial_config,
-                             Server::Configuration::FactoryContext& factory_context)
-      : MutableConfigProviderBase(std::move(subscription), factory_context, ApiType::Full),
+  explicit DummyDynamicConfigProvider(DummyConfigSubscriptionSharedPtr&& subscription)
+      : MutableConfigProviderCommonBase(std::move(subscription), ApiType::Full),
         subscription_(static_cast<DummyConfigSubscription*>(
-            MutableConfigProviderCommonBase::subscription_.get())) {
-    initialize(initial_config);
-  }
+            MutableConfigProviderCommonBase::subscription_.get())) {}
 
   ~DummyDynamicConfigProvider() override = default;
 
   DummyConfigSubscription& subscription() { return *subscription_; }
-
-  // Envoy::Config::MutableConfigProviderBase
-  ConfigProvider::ConfigConstSharedPtr
-  onConfigProtoUpdate(const Protobuf::Message& config) override {
-    return std::make_shared<DummyConfig>(
-        static_cast<const test::common::config::DummyConfig&>(config));
-  }
 
   // Envoy::Config::ConfigProvider
   const Protobuf::Message* getConfigProto() const override {
@@ -127,7 +136,7 @@ private:
 
 class DummyConfigProviderManager : public ConfigProviderManagerImplBase {
 public:
-  DummyConfigProviderManager(Server::Admin& admin)
+  explicit DummyConfigProviderManager(Server::Admin& admin)
       : ConfigProviderManagerImplBase(admin, "dummy") {}
 
   ~DummyConfigProviderManager() override = default;
@@ -164,11 +173,11 @@ public:
   // Envoy::Config::ConfigProviderManager
   ConfigProviderPtr
   createXdsConfigProvider(const Protobuf::Message& config_source_proto,
-                          Server::Configuration::FactoryContext& factory_context,
-                          const std::string&,
+                          Server::Configuration::ServerFactoryContext& factory_context,
+                          Init::Manager& init_manager, const std::string&,
                           const Envoy::Config::ConfigProviderManager::OptionalArg&) override {
     DummyConfigSubscriptionSharedPtr subscription = getSubscription<DummyConfigSubscription>(
-        config_source_proto, factory_context.initManager(),
+        config_source_proto, init_manager,
         [&factory_context](const uint64_t manager_identifier,
                            ConfigProviderManagerImplBase& config_provider_manager)
             -> ConfigSubscriptionCommonBaseSharedPtr {
@@ -177,20 +186,13 @@ public:
               static_cast<DummyConfigProviderManager&>(config_provider_manager));
         });
 
-    ConfigProvider::ConfigConstSharedPtr initial_config;
-    const auto* provider = static_cast<const MutableConfigProviderBase*>(
-        subscription->getAnyBoundMutableConfigProvider());
-    if (provider) {
-      initial_config = provider->getConfig();
-    }
-    return std::make_unique<DummyDynamicConfigProvider>(std::move(subscription), initial_config,
-                                                        factory_context);
+    return std::make_unique<DummyDynamicConfigProvider>(std::move(subscription));
   }
 
   // Envoy::Config::ConfigProviderManager
   ConfigProviderPtr
   createStaticConfigProvider(const Protobuf::Message& config_proto,
-                             Server::Configuration::FactoryContext& factory_context,
+                             Server::Configuration::ServerFactoryContext& factory_context,
                              const Envoy::Config::ConfigProviderManager::OptionalArg&) override {
     return std::make_unique<StaticDummyConfigProvider>(
         dynamic_cast<const test::common::config::DummyConfig&>(config_proto), factory_context,
@@ -198,39 +200,44 @@ public:
   }
   ConfigProviderPtr
   createStaticConfigProvider(std::vector<std::unique_ptr<const Protobuf::Message>>&&,
-                             Server::Configuration::FactoryContext&, const OptionalArg&) override {
+                             Server::Configuration::ServerFactoryContext&,
+                             const OptionalArg&) override {
     ASSERT(false, "this provider does not expect multiple config protos");
     return nullptr;
   }
 };
 
+DummyConfigSubscription::DummyConfigSubscription(
+    const uint64_t manager_identifier, Server::Configuration::ServerFactoryContext& factory_context,
+    DummyConfigProviderManager& config_provider_manager)
+    : ConfigSubscriptionInstance("DummyDS", manager_identifier, config_provider_manager,
+                                 factory_context) {
+  // A nullptr is shared as the initial value.
+  initialize(nullptr);
+}
+
 StaticDummyConfigProvider::StaticDummyConfigProvider(
     const test::common::config::DummyConfig& config_proto,
-    Server::Configuration::FactoryContext& factory_context,
+    Server::Configuration::ServerFactoryContext& factory_context,
     DummyConfigProviderManager& config_provider_manager)
     : ImmutableConfigProviderBase(factory_context, config_provider_manager,
                                   ConfigProviderInstanceType::Static, ApiType::Full),
       config_(std::make_shared<DummyConfig>(config_proto)), config_proto_(config_proto) {}
 
-DummyConfigSubscription::DummyConfigSubscription(
-    const uint64_t manager_identifier, Server::Configuration::FactoryContext& factory_context,
-    DummyConfigProviderManager& config_provider_manager)
-    : ConfigSubscriptionInstance(
-          "DummyDS", manager_identifier, config_provider_manager, factory_context.timeSource(),
-          factory_context.timeSource().systemTime(), factory_context.localInfo()) {}
-
 class ConfigProviderImplTest : public testing::Test {
 public:
   void initialize() {
-    EXPECT_CALL(factory_context_.admin_.config_tracker_, add_("dummy", _));
-    provider_manager_ = std::make_unique<DummyConfigProviderManager>(factory_context_.admin_);
+    EXPECT_CALL(server_factory_context_.admin_.config_tracker_, add_("dummy", _));
+    provider_manager_ =
+        std::make_unique<DummyConfigProviderManager>(server_factory_context_.admin_);
   }
 
   Event::SimulatedTimeSystem& timeSystem() { return time_system_; }
 
 protected:
   Event::SimulatedTimeSystem time_system_;
-  NiceMock<Server::Configuration::MockFactoryContext> factory_context_;
+  NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context_;
+  NiceMock<Init::MockManager> init_manager_;
   std::unique_ptr<DummyConfigProviderManager> provider_manager_;
 };
 
@@ -246,12 +253,12 @@ test::common::config::DummyConfig parseDummyConfigFromYaml(const std::string& ya
 TEST_F(ConfigProviderImplTest, SharedOwnership) {
   initialize();
   Init::ExpectableWatcherImpl watcher;
-  factory_context_.init_manager_.initialize(watcher);
+  init_manager_.initialize(watcher);
 
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   ConfigProviderPtr provider1 = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
   // No config protos have been received via the subscription yet.
@@ -267,7 +274,7 @@ TEST_F(ConfigProviderImplTest, SharedOwnership) {
   // Check that a newly created provider with the same config source will share
   // the subscription, config proto and resulting ConfigProvider::Config.
   ConfigProviderPtr provider2 = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
   EXPECT_TRUE(provider2->configProtoInfo<test::common::config::DummyConfig>().has_value());
@@ -279,9 +286,9 @@ TEST_F(ConfigProviderImplTest, SharedOwnership) {
             provider2->config<const DummyConfig>().get());
 
   // Change the config source and verify that a new subscription is used.
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::REST);
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::REST);
   ConfigProviderPtr provider3 = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
   EXPECT_NE(&dynamic_cast<DummyDynamicConfigProvider&>(*provider1).subscription(),
@@ -318,7 +325,7 @@ TEST_F(ConfigProviderImplTest, SharedOwnership) {
                      .size());
 }
 
-// A ConfigProviderManager that returns a mock ConfigProvider.
+// A ConfigProviderManager that returns a dummy ConfigProvider.
 class DummyConfigProviderManagerMockConfigProvider : public DummyConfigProviderManager {
 public:
   DummyConfigProviderManagerMockConfigProvider(Server::Admin& admin)
@@ -326,11 +333,11 @@ public:
 
   ConfigProviderPtr
   createXdsConfigProvider(const Protobuf::Message& config_source_proto,
-                          Server::Configuration::FactoryContext& factory_context,
-                          const std::string&,
+                          Server::Configuration::ServerFactoryContext& factory_context,
+                          Init::Manager& init_manager, const std::string&,
                           const Envoy::Config::ConfigProviderManager::OptionalArg&) override {
     DummyConfigSubscriptionSharedPtr subscription = getSubscription<DummyConfigSubscription>(
-        config_source_proto, factory_context.initManager(),
+        config_source_proto, init_manager,
         [&factory_context](const uint64_t manager_identifier,
                            ConfigProviderManagerImplBase& config_provider_manager)
             -> ConfigSubscriptionCommonBaseSharedPtr {
@@ -338,40 +345,42 @@ public:
               manager_identifier, factory_context,
               static_cast<DummyConfigProviderManagerMockConfigProvider&>(config_provider_manager));
         });
-    return std::make_unique<MockMutableConfigProviderBase>(std::move(subscription), nullptr,
-                                                           factory_context);
+    return std::make_unique<DummyDynamicConfigProvider>(std::move(subscription));
   }
 };
 
 // Test that duplicate config updates will not trigger creation of a new ConfigProvider::Config.
 TEST_F(ConfigProviderImplTest, DuplicateConfigProto) {
   InSequence sequence;
-  // This provider manager returns a MockMutableConfigProviderBase.
-  auto provider_manager =
-      std::make_unique<DummyConfigProviderManagerMockConfigProvider>(factory_context_.admin_);
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  // This provider manager returns a DummyDynamicConfigProvider.
+  auto provider_manager = std::make_unique<DummyConfigProviderManagerMockConfigProvider>(
+      server_factory_context_.admin_);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   ConfigProviderPtr provider = provider_manager->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
-  auto* typed_provider = static_cast<MockMutableConfigProviderBase*>(provider.get());
-  DummyConfigSubscription& subscription =
-      static_cast<DummyConfigSubscription&>(typed_provider->subscription());
+  auto* typed_provider = static_cast<DummyDynamicConfigProvider*>(provider.get());
+  auto& subscription = static_cast<DummyConfigSubscription&>(typed_provider->subscription());
+  EXPECT_EQ(subscription.getConfig(), nullptr);
   // First time issuing a configUpdate(). A new ConfigProvider::Config should be created.
-  EXPECT_CALL(*typed_provider, onConfigProtoUpdate(_)).Times(1);
   Protobuf::RepeatedPtrField<ProtobufWkt::Any> untyped_dummy_configs;
   untyped_dummy_configs.Add()->PackFrom(parseDummyConfigFromYaml("a: a dynamic dummy config"));
   subscription.onConfigUpdate(untyped_dummy_configs, "1");
+  EXPECT_NE(subscription.getConfig(), nullptr);
+  auto config_ptr = subscription.getConfig();
+  EXPECT_EQ(typed_provider->config<DummyConfig>().get(), config_ptr.get());
   // Second time issuing the configUpdate(), this time with a duplicate proto. A new
   // ConfigProvider::Config _should not_ be created.
-  EXPECT_CALL(*typed_provider, onConfigProtoUpdate(_)).Times(0);
-  subscription.onConfigUpdate(untyped_dummy_configs, "1");
+  subscription.onConfigUpdate(untyped_dummy_configs, "2");
+  EXPECT_EQ(config_ptr, subscription.getConfig());
+  EXPECT_EQ(typed_provider->config<DummyConfig>().get(), config_ptr.get());
 }
 
 // An empty config provider tests on base class' constructor.
 class InlineDummyConfigProvider : public ImmutableConfigProviderBase {
 public:
-  InlineDummyConfigProvider(Server::Configuration::FactoryContext& factory_context,
+  InlineDummyConfigProvider(Server::Configuration::ServerFactoryContext& factory_context,
                             DummyConfigProviderManager& config_provider_manager,
                             ConfigProviderInstanceType instance_type)
       : ImmutableConfigProviderBase(factory_context, config_provider_manager, instance_type,
@@ -386,11 +395,11 @@ class ConfigProviderImplDeathTest : public ConfigProviderImplTest {};
 TEST_F(ConfigProviderImplDeathTest, AssertionFailureOnIncorrectInstanceType) {
   initialize();
 
-  InlineDummyConfigProvider foo(factory_context_, *provider_manager_,
+  InlineDummyConfigProvider foo(server_factory_context_, *provider_manager_,
                                 ConfigProviderInstanceType::Inline);
-  InlineDummyConfigProvider bar(factory_context_, *provider_manager_,
+  InlineDummyConfigProvider bar(server_factory_context_, *provider_manager_,
                                 ConfigProviderInstanceType::Static);
-  EXPECT_DEBUG_DEATH(InlineDummyConfigProvider(factory_context_, *provider_manager_,
+  EXPECT_DEBUG_DEATH(InlineDummyConfigProvider(server_factory_context_, *provider_manager_,
                                                ConfigProviderInstanceType::Xds),
                      "");
 }
@@ -401,7 +410,8 @@ TEST_F(ConfigProviderImplDeathTest, AssertionFailureOnIncorrectInstanceType) {
 TEST_F(ConfigProviderImplTest, ConfigDump) {
   initialize();
   // Empty dump first.
-  auto message_ptr = factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
+  auto message_ptr =
+      server_factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
   const auto& dummy_config_dump =
       static_cast<const test::common::config::DummyConfigsDump&>(*message_ptr);
 
@@ -418,9 +428,9 @@ dynamic_dummy_configs:
   timeSystem().setSystemTime(std::chrono::milliseconds(1234567891234));
 
   ConfigProviderPtr static_config = provider_manager_->createStaticConfigProvider(
-      parseDummyConfigFromYaml(config_yaml), factory_context_,
+      parseDummyConfigFromYaml(config_yaml), server_factory_context_,
       ConfigProviderManager::NullOptionalArg());
-  message_ptr = factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
+  message_ptr = server_factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
   const auto& dummy_config_dump2 =
       static_cast<const test::common::config::DummyConfigsDump&>(*message_ptr);
   TestUtility::loadFromYaml(R"EOF(
@@ -432,10 +442,10 @@ dynamic_dummy_configs:
                             expected_config_dump);
   EXPECT_EQ(expected_config_dump.DebugString(), dummy_config_dump2.DebugString());
 
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   ConfigProviderPtr dynamic_provider = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
   // Static + dynamic config dump.
@@ -447,7 +457,7 @@ dynamic_dummy_configs:
       dynamic_cast<DummyDynamicConfigProvider&>(*dynamic_provider).subscription();
   subscription.onConfigUpdate(untyped_dummy_configs, "v1");
 
-  message_ptr = factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
+  message_ptr = server_factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
   const auto& dummy_config_dump3 =
       static_cast<const test::common::config::DummyConfigsDump&>(*message_ptr);
   TestUtility::loadFromYaml(R"EOF(
@@ -463,9 +473,9 @@ dynamic_dummy_configs:
   EXPECT_EQ(expected_config_dump.DebugString(), dummy_config_dump3.DebugString());
 
   ConfigProviderPtr static_config2 = provider_manager_->createStaticConfigProvider(
-      parseDummyConfigFromYaml("a: another static dummy config"), factory_context_,
+      parseDummyConfigFromYaml("a: another static dummy config"), server_factory_context_,
       ConfigProviderManager::NullOptionalArg());
-  message_ptr = factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
+  message_ptr = server_factory_context_.admin_.config_tracker_.config_tracker_callbacks_["dummy"]();
   const auto& dummy_config_dump4 =
       static_cast<const test::common::config::DummyConfigsDump&>(*message_ptr);
   TestUtility::loadFromYaml(R"EOF(
@@ -488,14 +498,14 @@ dynamic_dummy_configs:
 // subscriptions.
 TEST_F(ConfigProviderImplTest, LocalInfoNotDefined) {
   initialize();
-  factory_context_.local_info_.node_.set_cluster("");
-  factory_context_.local_info_.node_.set_id("");
+  server_factory_context_.local_info_.node_.set_cluster("");
+  server_factory_context_.local_info_.node_.set_id("");
 
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   EXPECT_THROW_WITH_MESSAGE(
-      provider_manager_->createXdsConfigProvider(config_source_proto, factory_context_,
-                                                 "dummy_prefix",
+      provider_manager_->createXdsConfigProvider(config_source_proto, server_factory_context_,
+                                                 init_manager_, "dummy_prefix",
                                                  ConfigProviderManager::NullOptionalArg()),
       EnvoyException,
       "DummyDS: node 'id' and 'cluster' are required. Set it either in 'node' config or "
@@ -510,7 +520,7 @@ public:
   using ProtoMap = std::map<std::string, test::common::config::DummyConfig>;
 
   DeltaDummyConfigSubscription(const uint64_t manager_identifier,
-                               Server::Configuration::FactoryContext& factory_context,
+                               Server::Configuration::ServerFactoryContext& factory_context,
                                DeltaDummyConfigProviderManager& config_provider_manager);
 
   // Envoy::Config::ConfigSubscriptionCommonBase
@@ -518,12 +528,37 @@ public:
 
   // Envoy::Config::SubscriptionCallbacks
   void onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>& resources,
-                      const std::string& version_info) override;
-  void onConfigUpdate(const Protobuf::RepeatedPtrField<envoy::api::v2::Resource>&,
+                      const std::string& version_info) override {
+    if (resources.empty()) {
+      return;
+    }
+
+    // For simplicity, there is no logic here to track updates and/or removals to the existing
+    // config proto set (i.e., this is append only). Real xDS APIs will need to track additions,
+    // updates and removals to the config set and apply the diffs to the underlying config
+    // implementations.
+    for (const auto& resource_any : resources) {
+      auto dummy_config = TestUtility::anyConvert<test::common::config::DummyConfig>(resource_any);
+      proto_map_[version_info] = dummy_config;
+      // Propagate the new config proto to all worker threads.
+      applyConfigUpdate([&dummy_config](ConfigProvider::ConfigConstSharedPtr prev_config)
+                            -> ConfigProvider::ConfigConstSharedPtr {
+        auto* config = const_cast<DummyConfig*>(static_cast<const DummyConfig*>(prev_config.get()));
+        // Per above, append only for now.
+        config->addProto(dummy_config);
+        return prev_config;
+      });
+    }
+
+    ConfigSubscriptionCommonBase::onConfigUpdate();
+    setLastConfigInfo(absl::optional<LastConfigInfo>({absl::nullopt, version_info}));
+  }
+  void onConfigUpdate(const Protobuf::RepeatedPtrField<envoy::service::discovery::v3::Resource>&,
                       const Protobuf::RepeatedPtrField<std::string>&, const std::string&) override {
     NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
   }
-  void onConfigUpdateFailed(const EnvoyException*) override {
+  void onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason,
+                            const EnvoyException*) override {
     ConfigSubscriptionCommonBase::onConfigUpdateFailed();
   }
   std::string resourceName(const ProtobufWkt::Any&) override {
@@ -537,32 +572,12 @@ private:
 };
 using DeltaDummyConfigSubscriptionSharedPtr = std::shared_ptr<DeltaDummyConfigSubscription>;
 
-class ThreadLocalDummyConfig : public ThreadLocal::ThreadLocalObject,
-                               public Envoy::Config::ConfigProvider::Config {
+class DeltaDummyDynamicConfigProvider : public Envoy::Config::MutableConfigProviderCommonBase {
 public:
-  void addProto(const test::common::config::DummyConfig& config_proto) {
-    protos_.push_back(config_proto);
-  }
-
-  uint32_t numProtos() const { return protos_.size(); }
-
-private:
-  std::vector<test::common::config::DummyConfig> protos_;
-};
-
-class DeltaDummyDynamicConfigProvider : public Envoy::Config::DeltaMutableConfigProviderBase {
-public:
-  DeltaDummyDynamicConfigProvider(DeltaDummyConfigSubscriptionSharedPtr&& subscription,
-                                  Server::Configuration::FactoryContext& factory_context,
-                                  std::shared_ptr<ThreadLocalDummyConfig> dummy_config)
-      : DeltaMutableConfigProviderBase(std::move(subscription), factory_context,
-                                       ConfigProvider::ApiType::Delta),
+  DeltaDummyDynamicConfigProvider(DeltaDummyConfigSubscriptionSharedPtr&& subscription)
+      : MutableConfigProviderCommonBase(std::move(subscription), ConfigProvider::ApiType::Delta),
         subscription_(static_cast<DeltaDummyConfigSubscription*>(
-            MutableConfigProviderCommonBase::subscription_.get())) {
-    initialize([&dummy_config](Event::Dispatcher&) -> ThreadLocal::ThreadLocalObjectSharedPtr {
-      return (dummy_config != nullptr) ? dummy_config : std::make_shared<ThreadLocalDummyConfig>();
-    });
-  }
+            MutableConfigProviderCommonBase::subscription_.get())) {}
 
   DeltaDummyConfigSubscription& subscription() { return *subscription_; }
 
@@ -574,22 +589,11 @@ public:
     }
     return proto_vector;
   }
+
   std::string getConfigVersion() const override {
     return (subscription_->configInfo().has_value())
                ? subscription_->configInfo().value().last_config_version_
                : "";
-  }
-  ConfigConstSharedPtr getConfig() const override {
-    return std::dynamic_pointer_cast<const Envoy::Config::ConfigProvider::Config>(tls_->get());
-  }
-
-  // Envoy::Config::DeltaMutableConfigProviderBase
-  ConfigSharedPtr getConfig() override {
-    return std::dynamic_pointer_cast<Envoy::Config::ConfigProvider::Config>(tls_->get());
-  }
-
-  std::shared_ptr<ThreadLocalDummyConfig> getThreadLocalDummyConfig() {
-    return std::dynamic_pointer_cast<ThreadLocalDummyConfig>(tls_->get());
   }
 
 private:
@@ -628,12 +632,13 @@ public:
   // Envoy::Config::ConfigProviderManager
   ConfigProviderPtr
   createXdsConfigProvider(const Protobuf::Message& config_source_proto,
-                          Server::Configuration::FactoryContext& factory_context,
-                          const std::string&,
+                          Server::Configuration::ServerFactoryContext& factory_context,
+                          Init::Manager& init_manager, const std::string&,
                           const Envoy::Config::ConfigProviderManager::OptionalArg&) override {
     DeltaDummyConfigSubscriptionSharedPtr subscription =
+
         getSubscription<DeltaDummyConfigSubscription>(
-            config_source_proto, factory_context.initManager(),
+            config_source_proto, init_manager,
             [&factory_context](const uint64_t manager_identifier,
                                ConfigProviderManagerImplBase& config_provider_manager)
                 -> ConfigSubscriptionCommonBaseSharedPtr {
@@ -642,68 +647,43 @@ public:
                   static_cast<DeltaDummyConfigProviderManager&>(config_provider_manager));
             });
 
-    auto* existing_provider = static_cast<DeltaDummyDynamicConfigProvider*>(
-        subscription->getAnyBoundMutableConfigProvider());
-    return std::make_unique<DeltaDummyDynamicConfigProvider>(
-        std::move(subscription), factory_context,
-        (existing_provider != nullptr) ? existing_provider->getThreadLocalDummyConfig() : nullptr);
+    return std::make_unique<DeltaDummyDynamicConfigProvider>(std::move(subscription));
   }
 };
 
 DeltaDummyConfigSubscription::DeltaDummyConfigSubscription(
-    const uint64_t manager_identifier, Server::Configuration::FactoryContext& factory_context,
+    const uint64_t manager_identifier, Server::Configuration::ServerFactoryContext& factory_context,
     DeltaDummyConfigProviderManager& config_provider_manager)
-    : DeltaConfigSubscriptionInstance(
-          "Dummy", manager_identifier, config_provider_manager, factory_context.timeSource(),
-          factory_context.timeSource().systemTime(), factory_context.localInfo()) {}
-
-void DeltaDummyConfigSubscription::onConfigUpdate(
-    const Protobuf::RepeatedPtrField<ProtobufWkt::Any>& resources,
-    const std::string& version_info) {
-  if (resources.empty()) {
-    return;
-  }
-
-  // For simplicity, there is no logic here to track updates and/or removals to the existing config
-  // proto set (i.e., this is append only). Real xDS APIs will need to track additions, updates and
-  // removals to the config set and apply the diffs to the underlying config implementations.
-  for (const auto& resource_any : resources) {
-    auto dummy_config = TestUtility::anyConvert<test::common::config::DummyConfig>(resource_any);
-    proto_map_[version_info] = dummy_config;
-    // Propagate the new config proto to all worker threads.
-    applyDeltaConfigUpdate([&dummy_config](const ConfigSharedPtr& config) {
-      auto* thread_local_dummy_config = static_cast<ThreadLocalDummyConfig*>(config.get());
-      // Per above, append only for now.
-      thread_local_dummy_config->addProto(dummy_config);
-    });
-  }
-
-  ConfigSubscriptionCommonBase::onConfigUpdate();
-  setLastConfigInfo(absl::optional<LastConfigInfo>({absl::nullopt, version_info}));
+    : DeltaConfigSubscriptionInstance("Dummy", manager_identifier, config_provider_manager,
+                                      factory_context) {
+  initialize(
+      []() -> ConfigProvider::ConfigConstSharedPtr { return std::make_shared<DummyConfig>(); });
 }
 
 class DeltaConfigProviderImplTest : public testing::Test {
 public:
   DeltaConfigProviderImplTest() {
-    EXPECT_CALL(factory_context_.admin_.config_tracker_, add_("dummy", _));
-    provider_manager_ = std::make_unique<DeltaDummyConfigProviderManager>(factory_context_.admin_);
+    EXPECT_CALL(server_factory_context_.admin_.config_tracker_, add_("dummy", _));
+    provider_manager_ =
+        std::make_unique<DeltaDummyConfigProviderManager>(server_factory_context_.admin_);
   }
 
   Event::SimulatedTimeSystem& timeSystem() { return time_system_; }
 
 protected:
   Event::SimulatedTimeSystem time_system_;
-  NiceMock<Server::Configuration::MockFactoryContext> factory_context_;
+  NiceMock<Server::Configuration::MockServerFactoryContext> server_factory_context_;
+  NiceMock<Init::MockManager> init_manager_;
   std::unique_ptr<DeltaDummyConfigProviderManager> provider_manager_;
 };
 
 // Validate that delta config subscriptions are shared across delta dynamic config providers and
 // that the underlying Config implementation can be shared as well.
 TEST_F(DeltaConfigProviderImplTest, MultipleDeltaSubscriptions) {
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   ConfigProviderPtr provider1 = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
   // No config protos have been received via the subscription yet.
@@ -718,10 +698,10 @@ TEST_F(DeltaConfigProviderImplTest, MultipleDeltaSubscriptions) {
   subscription.onConfigUpdate(untyped_dummy_configs, "1");
 
   ConfigProviderPtr provider2 = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
 
-  // Providers, config implementations (i.e., the ThreadLocalDummyConfig) and config protos are
+  // Providers, config implementations (i.e., the DummyConfig) and config protos are
   // expected to be shared for a given subscription.
   EXPECT_EQ(&dynamic_cast<DeltaDummyDynamicConfigProvider&>(*provider1).subscription(),
             &dynamic_cast<DeltaDummyDynamicConfigProvider&>(*provider2).subscription());
@@ -729,27 +709,29 @@ TEST_F(DeltaConfigProviderImplTest, MultipleDeltaSubscriptions) {
   EXPECT_EQ(
       provider1->configProtoInfoVector<test::common::config::DummyConfig>().value().config_protos_,
       provider2->configProtoInfoVector<test::common::config::DummyConfig>().value().config_protos_);
-  EXPECT_EQ(provider1->config<const ThreadLocalDummyConfig>().get(),
-            provider2->config<const ThreadLocalDummyConfig>().get());
+  EXPECT_EQ(provider1->config<const DummyConfig>().get(),
+            provider2->config<const DummyConfig>().get());
   // Validate that the config protos are propagated to the thread local config implementation.
-  EXPECT_EQ(provider1->config<const ThreadLocalDummyConfig>()->numProtos(), 2);
+  EXPECT_EQ(provider1->config<const DummyConfig>()->numProtos(), 2);
 
   // Issue a second config update to validate that having multiple providers bound to the
   // subscription causes a single update to the underlying shared config implementation.
   subscription.onConfigUpdate(untyped_dummy_configs, "2");
   // NOTE: the config implementation is append only and _does not_ track updates/removals to the
   // config proto set, so the expectation is to double the size of the set.
-  EXPECT_EQ(provider1->config<const ThreadLocalDummyConfig>()->numProtos(), 4);
+  EXPECT_EQ(provider1->config<const DummyConfig>().get(),
+            provider2->config<const DummyConfig>().get());
+  EXPECT_EQ(provider1->config<const DummyConfig>()->numProtos(), 4);
   EXPECT_EQ(provider1->configProtoInfoVector<test::common::config::DummyConfig>().value().version_,
             "2");
 }
 
 // Tests a config update failure.
 TEST_F(DeltaConfigProviderImplTest, DeltaSubscriptionFailure) {
-  envoy::api::v2::core::ApiConfigSource config_source_proto;
-  config_source_proto.set_api_type(envoy::api::v2::core::ApiConfigSource::GRPC);
+  envoy::config::core::v3::ApiConfigSource config_source_proto;
+  config_source_proto.set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
   ConfigProviderPtr provider = provider_manager_->createXdsConfigProvider(
-      config_source_proto, factory_context_, "dummy_prefix",
+      config_source_proto, server_factory_context_, init_manager_, "dummy_prefix",
       ConfigProviderManager::NullOptionalArg());
   DeltaDummyConfigSubscription& subscription =
       dynamic_cast<DeltaDummyDynamicConfigProvider&>(*provider).subscription();
@@ -757,7 +739,8 @@ TEST_F(DeltaConfigProviderImplTest, DeltaSubscriptionFailure) {
   timeSystem().setSystemTime(time);
   const EnvoyException ex(fmt::format("config failure"));
   // Verify the failure updates the lastUpdated() timestamp.
-  subscription.onConfigUpdateFailed(&ex);
+  subscription.onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason::ConnectionFailure,
+                                    &ex);
   EXPECT_EQ(std::chrono::time_point_cast<std::chrono::milliseconds>(provider->lastUpdated())
                 .time_since_epoch(),
             time);

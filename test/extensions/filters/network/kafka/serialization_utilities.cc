@@ -5,35 +5,17 @@ namespace Extensions {
 namespace NetworkFilters {
 namespace Kafka {
 
-void assertStringViewIncrement(absl::string_view incremented, absl::string_view original,
-                               size_t difference) {
+void assertStringViewIncrement(const absl::string_view incremented,
+                               const absl::string_view original, const size_t difference) {
 
   ASSERT_EQ(incremented.data(), original.data() + difference);
   ASSERT_EQ(incremented.size(), original.size() - difference);
 }
 
 const char* getRawData(const Buffer::OwnedImpl& buffer) {
-  uint64_t num_slices = buffer.getRawSlices(nullptr, 0);
-  STACK_ARRAY(slices, Buffer::RawSlice, num_slices);
-  buffer.getRawSlices(slices.begin(), num_slices);
+  Buffer::RawSliceVector slices = buffer.getRawSlices(1);
+  ASSERT(slices.size() == 1);
   return reinterpret_cast<const char*>((slices[0]).mem_);
-}
-
-void CapturingRequestCallback::onMessage(AbstractRequestSharedPtr message) {
-  captured_.push_back(message);
-}
-
-void CapturingRequestCallback::onFailedParse(RequestParseFailureSharedPtr failure_data) {
-  parse_failures_.push_back(failure_data);
-}
-
-const std::vector<AbstractRequestSharedPtr>& CapturingRequestCallback::getCaptured() const {
-  return captured_;
-}
-
-const std::vector<RequestParseFailureSharedPtr>&
-CapturingRequestCallback::getParseFailures() const {
-  return parse_failures_;
 }
 
 } // namespace Kafka

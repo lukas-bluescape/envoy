@@ -17,6 +17,7 @@
 #include "common/filesystem/filesystem_impl.h"
 
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 
 namespace Envoy {
 namespace Filesystem {
@@ -28,15 +29,36 @@ FileImplPosix::~FileImplPosix() {
   }
 }
 
-void FileImplPosix::openFile() {
-  const int flags = O_RDWR | O_APPEND | O_CREAT;
-  const int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-
-  fd_ = ::open(path_.c_str(), flags, mode);
+void FileImplPosix::openFile(FlagSet in) {
+  const auto flags_and_mode = translateFlag(in);
+  fd_ = ::open(path_.c_str(), flags_and_mode.flags_, flags_and_mode.mode_);
 }
 
 ssize_t FileImplPosix::writeFile(absl::string_view buffer) {
   return ::write(fd_, buffer.data(), buffer.size());
+}
+
+FileImplPosix::FlagsAndMode FileImplPosix::translateFlag(FlagSet in) {
+  int out = 0;
+  mode_t mode = 0;
+  if (in.test(File::Operation::Create)) {
+    out |= O_CREAT;
+    mode |= S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+  }
+
+  if (in.test(File::Operation::Append)) {
+    out |= O_APPEND;
+  }
+
+  if (in.test(File::Operation::Read) && in.test(File::Operation::Write)) {
+    out |= O_RDWR;
+  } else if (in.test(File::Operation::Read)) {
+    out |= O_RDONLY;
+  } else if (in.test(File::Operation::Write)) {
+    out |= O_WRONLY;
+  }
+
+  return {out, mode};
 }
 
 bool FileImplPosix::closeFile() { return ::close(fd_) != -1; }
@@ -70,14 +92,14 @@ ssize_t InstanceImplPosix::fileSize(const std::string& path) {
 
 std::string InstanceImplPosix::fileReadToEnd(const std::string& path) {
   if (illegalPath(path)) {
-    throw EnvoyException(fmt::format("Invalid path: {}", path));
+    throw EnvoyException(absl::StrCat("Invalid path: ", path));
   }
 
   std::ios::sync_with_stdio(false);
 
   std::ifstream file(path);
   if (file.fail()) {
-    throw EnvoyException(fmt::format("unable to read file: {}", path));
+    throw EnvoyException(absl::StrCat("unable to read file: ", path));
   }
 
   std::stringstream file_string;
@@ -86,7 +108,31 @@ std::string InstanceImplPosix::fileReadToEnd(const std::string& path) {
   return file_string.str();
 }
 
+PathSplitResult InstanceImplPosix::splitPathFromFilename(absl::string_view path) {
+  size_t last_slash = path.rfind('/');
+  if (last_slash == std::string::npos) {
+    throw EnvoyException(fmt::format("invalid file path {}", path));
+  }
+  absl::string_view name = path.substr(last_slash + 1);
+  // truncate all trailing slashes, except root slash
+  if (last_slash == 0) {
+    ++last_slash;
+  }
+  return {path.substr(0, last_slash), name};
+}
+
 bool InstanceImplPosix::illegalPath(const std::string& path) {
+  // Special case, allow /dev/fd/* access here so that config can be passed in a
+  // file descriptor from a bootstrap script via exec. The reason we do this
+  // _before_ canonicalizing the path is that different unix flavors implement
+  // /dev/fd/* differently, for example on linux they are symlinks to /dev/pts/*
+  // which are symlinks to /proc/self/fds/. On BSD (and darwin) they are not
+  // symlinks at all. To avoid lots of platform, specifics, we whitelist
+  // /dev/fd/* _before_ resolving the canonical path.
+  if (absl::StartsWith(path, "/dev/fd/")) {
+    return false;
+  }
+
   const Api::SysCallStringResult canonical_path = canonicalPath(path);
   if (canonical_path.rc_.empty()) {
     ENVOY_LOG_MISC(debug, "Unable to determine canonical path for {}: {}", path,
@@ -108,7 +154,6 @@ bool InstanceImplPosix::illegalPath(const std::string& path) {
 }
 
 Api::SysCallStringResult InstanceImplPosix::canonicalPath(const std::string& path) {
-  // TODO(htuch): When we are using C++17, switch to std::filesystem::canonical.
   char* resolved_path = ::realpath(path.c_str(), nullptr);
   if (resolved_path == nullptr) {
     return {std::string(), errno};

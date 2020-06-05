@@ -39,7 +39,7 @@ enum class ConnectionBufferType { Read, Write };
  */
 class ConnectionCallbacks {
 public:
-  virtual ~ConnectionCallbacks() {}
+  virtual ~ConnectionCallbacks() = default;
 
   /**
    * Callback for connection events.
@@ -80,7 +80,7 @@ public:
    * Callback function for when bytes have been sent by a connection.
    * @param bytes_sent supplies the number of bytes written to the connection.
    */
-  typedef std::function<void(uint64_t bytes_sent)> BytesSentCb;
+  using BytesSentCb = std::function<void(uint64_t bytes_sent)>;
 
   struct ConnectionStats {
     Stats::Counter& read_total_;
@@ -93,7 +93,7 @@ public:
     Stats::Counter* delayed_close_timeouts_;
   };
 
-  virtual ~Connection() {}
+  ~Connection() override = default;
 
   /**
    * Register callbacks that fire when connection events occur.
@@ -101,7 +101,7 @@ public:
   virtual void addConnectionCallbacks(ConnectionCallbacks& cb) PURE;
 
   /**
-   * Register for callback everytime bytes are written to the underlying TransportSocket.
+   * Register for callback every time bytes are written to the underlying TransportSocket.
    */
   virtual void addBytesSentCallback(BytesSentCb cb) PURE;
 
@@ -141,7 +141,7 @@ public:
 
   /**
    * Disable socket reads on the connection, applying external back pressure. When reads are
-   * enabled again if there is data still in the input buffer it will be redispatched through
+   * enabled again if there is data still in the input buffer it will be re-dispatched through
    * the filter chain.
    * @param disable supplies TRUE is reads should be disabled, FALSE if they should be enabled.
    *
@@ -171,6 +171,13 @@ public:
    * @return The address of the remote client. Note that this method will never return nullptr.
    */
   virtual const Network::Address::InstanceConstSharedPtr& remoteAddress() const PURE;
+
+  /**
+   * @return The address of the remote directly connected peer. Note that this method
+   * will never return nullptr. This address is not affected or modified by PROXY protocol
+   * or any other listener filter.
+   */
+  virtual const Network::Address::InstanceConstSharedPtr& directRemoteAddress() const PURE;
 
   /**
    * Credentials of the peer of a socket as decided by SO_PEERCRED.
@@ -215,7 +222,7 @@ public:
    * @return the const SSL connection data if this is an SSL connection, or nullptr if it is not.
    */
   // TODO(snowp): Remove this in favor of StreamInfo::downstreamSslConnection.
-  virtual const Ssl::ConnectionInfo* ssl() const PURE;
+  virtual Ssl::ConnectionInfoConstSharedPtr ssl() const PURE;
 
   /**
    * @return requested server name (e.g. SNI in TLS), if any.
@@ -290,18 +297,13 @@ public:
   virtual void setDelayedCloseTimeout(std::chrono::milliseconds timeout) PURE;
 
   /**
-   * @return std::chrono::milliseconds The delayed close timeout value.
-   */
-  virtual std::chrono::milliseconds delayedCloseTimeout() const PURE;
-
-  /**
    * @return std::string the failure reason of the underlying transport socket, if no failure
    *         occurred an empty string is returned.
    */
   virtual absl::string_view transportFailureReason() const PURE;
 };
 
-typedef std::unique_ptr<Connection> ConnectionPtr;
+using ConnectionPtr = std::unique_ptr<Connection>;
 
 /**
  * Connections capable of outbound connects.
@@ -315,7 +317,7 @@ public:
   virtual void connect() PURE;
 };
 
-typedef std::unique_ptr<ClientConnection> ClientConnectionPtr;
+using ClientConnectionPtr = std::unique_ptr<ClientConnection>;
 
 } // namespace Network
 } // namespace Envoy

@@ -10,7 +10,7 @@ template <typename KEY_TYPE, typename POOL_TYPE>
 PriorityConnPoolMap<KEY_TYPE, POOL_TYPE>::PriorityConnPoolMap(Envoy::Event::Dispatcher& dispatcher,
                                                               const HostConstSharedPtr& host) {
   for (size_t pool_map_index = 0; pool_map_index < NumResourcePriorities; ++pool_map_index) {
-    ResourcePriority priority = static_cast<ResourcePriority>(pool_map_index);
+    auto priority = static_cast<ResourcePriority>(pool_map_index);
     conn_pool_maps_[pool_map_index].reset(new ConnPoolMapType(dispatcher, host, priority));
   }
 }
@@ -19,7 +19,7 @@ template <typename KEY_TYPE, typename POOL_TYPE>
 PriorityConnPoolMap<KEY_TYPE, POOL_TYPE>::~PriorityConnPoolMap() = default;
 
 template <typename KEY_TYPE, typename POOL_TYPE>
-typename PriorityConnPoolMap<KEY_TYPE, POOL_TYPE>::OptPoolRef
+typename PriorityConnPoolMap<KEY_TYPE, POOL_TYPE>::PoolOptRef
 PriorityConnPoolMap<KEY_TYPE, POOL_TYPE>::getPool(ResourcePriority priority, KEY_TYPE key,
                                                   const PoolFactory& factory) {
   size_t index = static_cast<size_t>(priority);
