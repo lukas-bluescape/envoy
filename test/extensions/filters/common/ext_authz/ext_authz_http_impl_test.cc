@@ -125,6 +125,13 @@ public:
     return message_ptr;
   }
 
+  void expectTracing() {
+    EXPECT_CALL(active_span_, spawnChild_(_, config_->tracingName(), _))
+        .WillOnce(Return(child_span_));
+    EXPECT_CALL(*child_span_,
+                setTag(Eq(Tracing::Tags::get().UpstreamCluster), Eq(config_->cluster())));
+  }
+
   NiceMock<Upstream::MockClusterManager> cm_;
   NiceMock<Http::MockAsyncClient> async_client_;
   NiceMock<Http::MockAsyncClientRequest> async_request_;

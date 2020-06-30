@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "common/singleton/const_singleton.h"
+
 #include "envoy/common/pure.h"
 #include "envoy/http/codes.h"
 #include "envoy/service/auth/v3/external_auth.pb.h"
